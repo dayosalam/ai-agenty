@@ -1,6 +1,6 @@
 import { config } from '../config.js'
 import { logger } from '../core/logger.js'
-import type { Extraction, User } from '../models/index.js'
+import type { Extraction, Group, User } from '../models/index.js'
 import {
   extractionRepository,
   groupRepository,
@@ -127,16 +127,24 @@ export class DigestService {
     const live = await groupRepository.approved()
     const covered = new Set(live.map((group) => group.defaultCourseKey).filter(Boolean))
 
+    // A group approved without a course is still being read — the course is worked
+    // out per message — so it can carry any of them. Counting only course-keyed
+    // groups told a student "I'm not reading any group" a minute after telling them
+    // it had started reading one, which is the kind of contradiction they can check.
+    const open = live.filter((group) => !group.defaultCourseKey)
+
     const watching = student.courseKeys.filter((key) => covered.has(key))
     const unheard = student.courseKeys.filter((key) => !covered.has(key))
 
-    if (watching.length === 0) {
+    if (watching.length === 0 && open.length === 0) {
       const waiting = await groupRepository.pending()
       const pendingNote = waiting.length
         ? `\n\n*${waiting[0]!.name ?? 'A group'}* is waiting to be approved — once it is, I'll start picking things up from it.`
         : `\n\nAdd me to one of your course groups and tell me which course it's for.`
       return `Nothing yet — I'm not reading any group for your courses, so there's nothing I *could* have heard.${pendingNote}`
     }
+
+    if (watching.length === 0) return this.nothingInOpenGroups(student, label, open)
 
     // Distinguish an empty window from an empty archive: "nothing this week" reads
     // very differently when there are ten things from before it.
@@ -176,6 +184,26 @@ export class DigestService {
         : `\n\nAsk me again once something's been posted — or say *${courseDisplay(watching[0]!)} resources* to see what files are there.`
 
     return `${heading}${holding.length ? `\n\n${holding.join(' ')}` : ''}${gap}${next}`
+  }
+
+  /**
+   * Nothing yet, but from a group with no course pinned to it.
+   *
+   * Worth its own answer: the honest report is that Peermate is listening and the
+   * group has been quiet, not that it is deaf. Which courses it will end up covering
+   * is not knowable in advance — it depends on what people say in there.
+   */
+  private async nothingInOpenGroups(student: User, label: string, open: Group[]): Promise<string> {
+    const names = open.map((group) => `*${group.name ?? 'a group'}*`).join(', ')
+    const older = dedupe(await extractionRepository.forCourses(student.courseKeys, new Date(0)))
+
+    const holding = older.length
+      ? `\n\nI do have *${older.length}* older thing${older.length === 1 ? '' : 's'} on file — ask me to look further back.`
+      : ''
+
+    return `Nothing ${label} — I'm reading ${names} and ${open.length === 1 ? 'it has' : "they've"} been quiet.
+
+No single course is set for ${open.length === 1 ? 'it' : 'them'}, so I work out which course each message is about as it comes in.${holding}`
   }
 
   private greeting(student: User): string {

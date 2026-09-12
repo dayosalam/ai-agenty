@@ -209,7 +209,10 @@ ${changed === 1 ? "I'll remind you at the new time." : `That changed ${changed} 
     const today = zonedDay(now, config.digest.timezone)
     const days = this.horizon(when, now)
 
-    if (when === 'next') return this.nextUp(user, scoped, courseKey, now)
+    // "next" is answerable with no timetable at all — a test announced in a group is
+    // the next thing coming up whether or not one was ever photographed — so the
+    // never-seen check belongs inside it, where the announcements have been read.
+    if (when === 'next') return this.nextUp(user, scoped, courseKey, now, stored.length > 0)
 
     const lines: string[] = []
     for (const day of days) {
@@ -249,7 +252,8 @@ ${changed === 1 ? "I'll remind you at the new time." : `That changed ${changed} 
     stored: ScheduleEntry[],
     courseKey: string | null,
     now: Date,
-  ): Promise<string> {
+    hasTimetable: boolean,
+  ): Promise<string | null> {
     const zone = config.digest.timezone
     const upcoming: Upcoming[] = []
 
@@ -290,8 +294,13 @@ ${changed === 1 ? "I'll remind you at the new time." : `That changed ${changed} 
 
     const [next] = upcoming
     if (!next) {
+      // Null means Peermate has never been shown a timetable, which the caller says in
+      // its own words. "Nothing coming up" is for a timetable it has and that is empty
+      // — the same sentence for both makes the two indistinguishable to the student.
+      if (!hasTimetable) return null
+
       const only = courseKey ? ` for ${courseDisplay(courseKey)}` : ''
-      return `Nothing coming up${only} that I know of. Send me a photo of your timetable and I'll keep track.`
+      return `Nothing coming up${only} that I know of.`
     }
 
     const rest = upcoming.slice(1, 4)

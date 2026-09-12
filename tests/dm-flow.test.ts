@@ -137,6 +137,14 @@ vi.mock('../src/services/group.service.js', () => ({
 
 vi.mock('../src/db/minio.js', () => ({ getMedia: vi.fn(async () => Buffer.from('bytes')) }))
 
+let timetableRead: unknown = null
+vi.mock('../src/services/timetable.service.js', () => ({
+  timetableService: {
+    looksLikeTimetable: vi.fn(() => timetableRead !== null),
+    read: vi.fn(async () => timetableRead),
+  },
+}))
+
 let webFinds: Array<{ title: string; url: string }> = []
 let downloadable = true
 vi.mock('../src/services/research.service.js', () => ({
@@ -215,6 +223,7 @@ function dm(text: string): Message {
 
 beforeEach(() => {
   routeQueue = []
+  timetableRead = null
   webFinds = []
   downloadable = true
   outbox.length = 0
@@ -494,6 +503,23 @@ describe('material from outside the group', () => {
     expect(learned).toContainEqual({ courseKey: 'CSC301', title: 'data structures' })
   })
 
+  /**
+   * "How many PDFs do we have on CVE 565" filed that course under the title "How
+   * many", which then became the subject every later search ran on. A title is only a
+   * title where a title goes: straight after the code.
+   */
+  it('does not mistake the rest of a question for a course title', async () => {
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('How many pdf do we have on CSC 301'))
+    expect(learned).toHaveLength(0)
+  })
+
   it('never overwrites a title that came from a document', async () => {
     knownCourses = [
       {
@@ -551,6 +577,51 @@ describe('material from outside the group', () => {
     expect(conversation?.pendingAction).toBe('choose_web_file')
   })
 
+  /**
+   * The message carrying the first list can be lost to a dropped socket, and asking
+   * again is exactly what somebody does when that happens. "I couldn't find anything"
+   * leaves them empty-handed over results Peermate is holding.
+   */
+  it('shows the list again when a second look turns up nothing new', async () => {
+    webFinds = [{ title: 'Traffic flow notes', url: 'https://example.edu/a.pdf' }]
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('external material for CSC 301'))
+    await dmService.handle(dm('yes'))
+    expect(outbox.at(-1)).toMatch(/Found 1 PDF/)
+
+    // Nothing new the second time — the one result is already excluded.
+    webFinds = []
+    await dmService.handle(dm('external material for CSC 301'))
+
+    expect(outbox.at(-1)).toMatch(/Nothing new/)
+    expect(outbox.at(-1)).toMatch(/Traffic flow notes/)
+    expect(conversation?.pendingAction).toBe('choose_web_file')
+  })
+
+  it('can still send from a list that was shown again', async () => {
+    webFinds = [{ title: 'Traffic flow notes', url: 'https://example.edu/a.pdf' }]
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('external material for CSC 301'))
+    await dmService.handle(dm('yes'))
+    webFinds = []
+    await dmService.handle(dm('external material for CSC 301'))
+    await dmService.handle(dm('1'))
+
+    expect(sentFiles).toEqual(['notes.pdf'])
+  })
+
   it('sends the one they picked', async () => {
     webFinds = [
       { title: 'Intro to Algorithms notes', url: 'https://example.edu/a.pdf' },
@@ -606,6 +677,93 @@ describe('material from outside the group', () => {
 
     expect(sentFiles).toHaveLength(0)
     expect(answer).toHaveBeenCalled()
+  })
+})
+
+/**
+ * A week's grid is mostly course codes, so "course list" is the easy misread — and
+ * taking that label discarded a fully read timetable, leaving the student enrolled in
+ * the right courses with no schedule and nothing to say anything had been lost.
+ */
+describe('reading a photographed timetable', () => {
+  const row = (courseKey: string, weekday: number, time: string) => ({
+    courseKey,
+    course: courseKey,
+    kind: 'lecture',
+    date: null,
+    weekday,
+    time,
+    venue: null,
+    sourceMessageId: 'img-1',
+    createdAt: new Date(),
+  })
+
+  const photo = (): Message => ({ ...dm(''), type: 'image', transcript: 'Monday CVE 575 8am' })
+
+  it('keeps the schedule even when the model calls it a course list', async () => {
+    timetableRead = {
+      kind: 'course_list',
+      unreadable: false,
+      entries: [row('CSC301', 1, '08:00')],
+      courseKeys: ['CSC301'],
+      courses: [],
+      mismatches: [],
+      undated: [],
+    }
+
+    await dmService.handle(photo())
+    expect(outbox.at(-1)).toMatch(/Is that right\?/)
+    expect(conversation?.pendingAction).toBe('confirm_timetable')
+  })
+
+  it('still reads a genuine course list as one', async () => {
+    timetableRead = {
+      kind: 'course_list',
+      unreadable: false,
+      entries: [],
+      courseKeys: ['MTH101'],
+      courses: [],
+      mismatches: [],
+      undated: [],
+    }
+
+    await dmService.handle(photo())
+    expect(outbox.at(-1)).toMatch(/Read that as a course list/)
+  })
+
+  /**
+   * apply() keeps only rows for courses the student watches, so a first timetable was
+   * read correctly, previewed in full, and then stored nothing at all.
+   */
+  it('starts watching the courses on it', async () => {
+    timetableRead = {
+      kind: 'class_timetable',
+      unreadable: false,
+      entries: [row('CSC301', 1, '08:00'), row('PHY102', 2, '10:00')],
+      courseKeys: ['CSC301', 'PHY102'],
+      courses: [],
+      mismatches: [],
+      undated: [],
+    }
+
+    await dmService.handle(photo())
+    expect(user.courseKeys).toContain('PHY102')
+    expect(outbox.at(-1)).toMatch(/added PHY 102 to your courses/i)
+  })
+
+  it('says nothing about courses it was already watching', async () => {
+    timetableRead = {
+      kind: 'class_timetable',
+      unreadable: false,
+      entries: [row('CSC301', 1, '08:00')],
+      courseKeys: ['CSC301'],
+      courses: [],
+      mismatches: [],
+      undated: [],
+    }
+
+    await dmService.handle(photo())
+    expect(outbox.at(-1)).not.toMatch(/added/i)
   })
 })
 

@@ -93,6 +93,43 @@ describe('asking what has happened when nothing has', () => {
     expect(answer).toMatch(/waiting to be approved/i)
   })
 
+  /**
+   * A group approved with no course is still being read — the course is worked out per
+   * message. Counting only course-keyed groups told a student "I'm not reading any
+   * group" a minute after telling them it had started reading one.
+   */
+  it('does not claim to be deaf when it is reading a group with no course set', async () => {
+    approvedGroups = [
+      {
+        ...group('CVE575', 'Civil Engineering YEAR 5'),
+        defaultCourse: null,
+        defaultCourseKey: null,
+      },
+    ]
+
+    const answer = await digestService.catchUp(student(['CVE575']), 7, 'this week')
+    expect(answer).not.toMatch(/not reading any group/i)
+    expect(answer).toMatch(/Civil Engineering YEAR 5/)
+    expect(answer).toMatch(/quiet/i)
+    expect(answer).toMatch(/work out which course/i)
+  })
+
+  it('offers what it holds from before, even from an open group', async () => {
+    approvedGroups = [
+      {
+        ...group('CVE575', 'Civil Engineering YEAR 5'),
+        defaultCourse: null,
+        defaultCourseKey: null,
+      },
+    ]
+    archive = [
+      { courseKey: 'CVE575', extractedAt: new Date('2020-01-01'), eventType: 'test' } as Extraction,
+    ]
+
+    const answer = await digestService.catchUp(student(['CVE575']), 7, 'this week')
+    expect(answer).toMatch(/\*1\* older thing on file/)
+  })
+
   /** "Nothing this week" reads very differently when ten things sit just behind it. */
   it('offers the older items rather than implying there are none', async () => {
     approvedGroups = [group('CVE575')]

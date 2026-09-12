@@ -327,6 +327,15 @@ an outright request for external material, gets a question first. Only on a yes 
 search, and what comes back is a numbered list to pick from rather than files that
 simply arrive.
 
+**A code written in a filename is evidence, not a judgement call.** The tagging model
+returned no course for `CVE 565.pdf` in the same batch where it filed
+`Unilorin_CVE575_Course 1-3.pdf` correctly, and a file with no course is invisible to
+every question about that course — the student is told nothing was ever shared while
+Peermate is holding it. A single unambiguous code in the filename now decides, with the
+model left to settle genuinely ambiguous names. Sequence numbers and years are not
+course numbers: `scan001.pdf` and `Assignment 2023` both parse as codes and both are
+rejected.
+
 **A course code is not a subject.** "CVE 575" is a local invention: it means nothing
 outside the university that issued it, and a web search on it matches MATH 575 just as
 happily — which is what a student asking for transportation engineering material got.
@@ -339,6 +348,11 @@ cannot tell before they open it.
 When no title is on record, the request itself supplies one — "material for CVE 575
 transportation engineering" is often the only place that name has ever appeared. A
 title that came from a document is never overwritten by one taken from a message.
+
+**Nothing new means the list again, not a dead end.** The message carrying a set of
+results can be lost to a dropped socket, and asking a second time is exactly what
+somebody does when that happens — so a second search that turns up nothing new shows
+what it already found rather than reporting failure over results Peermate is holding.
 
 **"Can you get one more" is not a fresh decision.** They already consented, so it
 searches again straight away, excluding what it has already offered.
@@ -395,6 +409,17 @@ written on an exam sheet, and what a group announced is weighed alongside both.
 in that message narrows it. A course carried over from the previous exchange turns
 "when is my next class?" into an answer about one course, which reads as Peermate
 having forgotten the rest of their timetable.
+
+**The entries decide, not the label.** A week's grid is mostly course codes, so the
+classifier calling it a course list is the easy misread — and acting on that label
+discarded a fully read timetable, leaving the student enrolled in the right courses
+with no schedule and nothing to say anything had been lost. A read that produced rows
+is a timetable; only one that produced none is a course list.
+
+**A photographed timetable enrols the courses on it.** It is the most authoritative
+statement of what a student takes, and storing keeps only rows for courses they watch —
+so without this a first timetable is read correctly, previewed in full, and then stores
+nothing.
 
 ### Reminders
 
@@ -453,6 +478,13 @@ goes to everyone registered.
 
 Department notices are never deduped or superseded against course announcements: two
 unrelated notices are not one event told twice.
+
+**A group approved with no course is still being read.** Every "am I covered?" answer
+counts course-keyed groups, and a departmental group has no course to key it by — so
+the same minute Peermate said it had started listening, it also said it was reading no
+group at all. Coverage now counts open groups as what they are: listening, with the
+course worked out per message. Which courses they will end up covering is not knowable
+in advance, so it is described rather than promised.
 
 ### Sending files
 

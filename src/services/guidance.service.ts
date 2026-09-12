@@ -125,8 +125,13 @@ async function listening({ isOperator, user }: Context): Promise<string> {
     // behind it is a course they will never hear about.
     const covered = new Set(live.map((group) => group.defaultCourseKey).filter(Boolean))
     const missing = user.courseKeys.filter((key) => !covered.has(key))
+    // A group with no course set can still carry any of them, so "I won't hear
+    // anything from those" would be false — it just cannot be promised in advance.
+    const open = live.some((group) => !group.defaultCourseKey)
     const gap = missing.length
-      ? `\n\n⚠️ Nothing connected yet for ${missing.map(courseDisplay).join(', ')} — I won't hear anything from those.`
+      ? open
+        ? `\n\n No group is pinned to ${missing.map(courseDisplay).join(', ')}, but I work out the course per message in the ones above — so I'll pick them up if they come up there.`
+        : `\n\n⚠️ Nothing connected yet for ${missing.map(courseDisplay).join(', ')} — I won't hear anything from those.`
       : ''
     return `${reading}${gap}`
   }

@@ -4,7 +4,7 @@ import { config } from '../config.js'
 import { logger } from '../core/logger.js'
 import { DocType, type Message, type Resource } from '../models/index.js'
 import { resourceRepository } from '../repositories/index.js'
-import { courseKey } from '../utils/courses.js'
+import { courseDisplay, courseKey, parseCourseList } from '../utils/courses.js'
 import { getOpenAI } from './openai.client.js'
 
 const Tag = z.object({
@@ -69,7 +69,12 @@ export class DocumentService {
     const tag = completion.choices[0]?.message.parsed
     if (!tag) return null
 
-    const course = tag.course ?? fallbackCourse
+    // A code written in the filename is evidence, not a judgement call. The model
+    // returned null for "CVE 565.pdf" while filing "Unilorin_CVE575_Course 1-3.pdf"
+    // correctly, and a file with no course is invisible to every question about that
+    // course — the student is told nothing was ever shared.
+    const named = codeInName(fileName)
+    const course = named ? (courseDisplay(named) ?? named) : (tag.course ?? fallbackCourse)
     const resource: Resource = {
       course,
       courseKey: courseKey(course),
@@ -89,6 +94,25 @@ export class DocumentService {
     )
     return resource
   }
+}
+
+/**
+ * Things that parse as a course code but are not one.
+ *
+ * "Assignment 2023" yields MENT2023 and "scan001.pdf" yields SCAN001 — a year is not a
+ * course number, and neither is a sequence number, which is what a leading zero means.
+ */
+const NOT_A_COURSE = /^[A-Z]+((19|20)\d{2}|0\d+)$/
+
+/**
+ * The one course code a filename names, or null.
+ *
+ * Two codes is not a filing decision — "CVE575_and_MTH101.pdf" belongs to whichever
+ * the sender meant, and only the surrounding words can say which.
+ */
+function codeInName(fileName: string): string | null {
+  const codes = parseCourseList(fileName).filter((code) => !NOT_A_COURSE.test(code))
+  return codes.length === 1 ? (codes[0] ?? null) : null
 }
 
 export const documentService = new DocumentService()

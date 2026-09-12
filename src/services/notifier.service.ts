@@ -2,10 +2,16 @@ import { GroupSendForbidden } from '../core/errors.js'
 import { logger } from '../core/logger.js'
 import { getMedia } from '../db/minio.js'
 import { isBroadcastJid, isGroupJid } from '../whatsapp/jid.js'
-import { getSocket } from '../whatsapp/socket.js'
+import { getSocket, whenOpen } from '../whatsapp/socket.js'
 import { VOICE_MIME } from './tts.service.js'
 
 const RETRY_DELAY_MS = 2000
+
+/** Three tries, because the common failure is a reconnect and not a bad message. */
+const SEND_ATTEMPTS = 3
+
+/** Longer than a reconnect takes, shorter than a student will wait for an answer. */
+const RECONNECT_WAIT_MS = 25_000
 
 /** WhatsApp drops a composing presence after ~10s, so refresh inside that window. */
 const TYPING_REFRESH_MS = 6000
@@ -88,14 +94,35 @@ export class NotifierService {
    * not, the retry delivers the message twice. A duplicate DM is a smaller failure
    * than a student never hearing about their test, which is the trade the PRD makes.
    */
+  /**
+   * Retries a send across a reconnect.
+   *
+   * WhatsApp drops the socket often enough that a reply lands mid-outage, and a retry
+   * on a fixed two-second timer fails again while Baileys is still dialling back in —
+   * the answer is lost and the student is left with silence they cannot distinguish
+   * from Peermate having nothing to say. So each attempt waits for the socket to come
+   * back rather than for the clock.
+   */
   private async withRetry<T>(send: () => Promise<T>, jid: string): Promise<T> {
-    try {
-      return await send()
-    } catch (error) {
-      logger.warn({ err: error, jid }, 'send failed, retrying once')
-      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
-      return send()
+    let last: unknown
+
+    for (let attempt = 1; attempt <= SEND_ATTEMPTS; attempt += 1) {
+      try {
+        return await send()
+      } catch (error) {
+        last = error
+        if (attempt === SEND_ATTEMPTS) break
+
+        logger.warn({ err: error, jid, attempt }, 'send failed, waiting for the socket')
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
+        if (!(await whenOpen(RECONNECT_WAIT_MS))) {
+          logger.error({ jid }, 'socket did not come back — giving up on this message')
+          break
+        }
+      }
     }
+
+    throw last
   }
 
   /** Inline, not as a file to download — an image sent as a document is unreadable. */

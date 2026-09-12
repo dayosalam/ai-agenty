@@ -21,6 +21,8 @@ const COLLECTIONS = [
   'notifications',
   'conversations',
   'pending_decisions',
+  'schedules',
+  'courses',
 ]
 
 async function clearMongo(): Promise<void> {

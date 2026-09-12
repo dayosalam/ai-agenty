@@ -135,8 +135,18 @@ describe('asking about your own timetable', () => {
     expect(answer).not.toMatch(/Today/)
   })
 
-  it('says nothing is coming up rather than nothing is dated', async () => {
+  /**
+   * Two different states, and they must not read the same. "Nothing coming up" about a
+   * timetable Peermate has never seen tells the student their week is clear when in
+   * fact nothing was ever uploaded.
+   */
+  it('says nothing is coming up when it holds a timetable with nothing ahead', async () => {
+    schedule = [entry({ kind: 'exam', date: '2020-01-01', time: '08:00' })]
     expect(await scheduleService.answer(student, 'next', null, WED)).toMatch(/Nothing coming up/)
+  })
+
+  it('admits it has never seen a timetable rather than calling the week clear', async () => {
+    expect(await scheduleService.answer(student, 'next', null, WED)).toBeNull()
   })
 
   it('names the next dated thing, and what follows it', async () => {

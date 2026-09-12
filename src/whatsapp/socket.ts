@@ -22,6 +22,10 @@ export type GroupJoinHandler = (chatJid: string, info: GroupJoinInfo) => void
 let sock: WASocket | null = null
 let reconnecting = false
 let attempts = 0
+let open = false
+
+/** Resolved the moment the socket comes back, so a caller need not poll for it. */
+const waitingForOpen: Array<() => void> = []
 
 const handlers: MessageHandler[] = []
 const groupHandlers: GroupJoinHandler[] = []
@@ -32,6 +36,32 @@ export function onMessage(handler: MessageHandler): void {
 
 export function onGroupJoin(handler: GroupJoinHandler): void {
   groupHandlers.push(handler)
+}
+
+/**
+ * Waits for the socket to be usable, for a caller holding something to send.
+ *
+ * A reconnect takes a few seconds. Retrying a send on a fixed timer inside that window
+ * fails a second time and the message is dropped — the student asked something and got
+ * silence. Resolves false if it does not come back within the timeout, which is the
+ * caller's cue to give up rather than to hold the message for ever.
+ */
+export async function whenOpen(timeoutMs: number): Promise<boolean> {
+  if (open) return true
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      const index = waitingForOpen.indexOf(wake)
+      if (index >= 0) waitingForOpen.splice(index, 1)
+      resolve(false)
+    }, timeoutMs)
+
+    const wake = (): void => {
+      clearTimeout(timer)
+      resolve(true)
+    }
+    waitingForOpen.push(wake)
+  })
 }
 
 export function getSocket(): WASocket {
@@ -97,10 +127,13 @@ export async function connectWhatsApp(): Promise<WASocket> {
     if (connection === 'open') {
       attempts = 0
       reconnecting = false
+      open = true
       logger.info({ jid: current.user?.id }, 'whatsapp connected')
+      for (const wake of waitingForOpen.splice(0)) wake()
     }
 
     if (connection === 'close') {
+      open = false
       const statusCode = (lastDisconnect?.error as { output?: { statusCode?: number } })?.output
         ?.statusCode
 

@@ -119,9 +119,39 @@ function subjectWords(text: string): string {
     .trim()
 }
 
+/** The pickable list, identical whether it is new or being shown again. */
+function listFindings(findings: WebFind[]): string {
+  const lines = findings.map((item) => `${item.position}. *${item.title}*\n   ${item.url}`)
+  return `${lines.join('\n\n')}
+
+_From the web, not from your group._
+
+Send *1*, *send 1 and 3*, or *all* and I'll send them over.`
+}
+
+/**
+ * A course title, only when it is written where a title goes: straight after the code.
+ *
+ * "CVE 575 transportation engineering" names the subject. "How many PDFs do we have on
+ * CVE 565" does not — and taking the leftovers of that sentence filed the course under
+ * the title "How many", which then became the query every later search ran on.
+ */
+function titleAfterCode(text: string, key: string): string {
+  const pattern = /([A-Za-z]{2,4})\s?(\d{3,4})\s*[:,-]?\s*([A-Za-z][A-Za-z\s]{3,60})/g
+
+  for (const match of text.matchAll(pattern)) {
+    if (courseKey(`${match[1]}${match[2]}`) !== key) continue
+    const words = subjectWords(match[3] ?? '')
+      .split(/\s+/)
+      .filter((word) => /^[a-z]{4,}$/i.test(word))
+    if (words.length >= 2) return words.join(' ')
+  }
+  return ''
+}
+
 /** The words of the request rather than of the subject. */
 const ASKING =
-  /\b(can|could|would|will|you|u|please|abeg|pls|plz|get|send|share|find|look|search|give|me|my|more|some|any|another|other|one|extra|external|outside|online|internet|web|material|materials|resource|resources|note|notes|file|files|document|documents|pdf|pdfs|book|for|about|on|of|the|a|an|i|we|want|need|it|them|too|also|again|thanks|thank)\b/gi
+  /\b(can|could|would|will|you|u|please|abeg|pls|plz|get|send|share|find|look|search|give|me|my|more|some|any|another|other|one|extra|external|outside|online|internet|web|material|materials|resource|resources|note|notes|file|files|document|documents|pdf|pdfs|book|for|about|on|of|the|a|an|i|we|want|need|it|them|too|also|again|thanks|thank|how|what|which|when|where|who|why|many|much|do|does|did|have|has|had|is|are|there|past|question|questions|paper|papers|slide|slides|lecture|lectures|tutorial|exam|exams|test|tests|assignment|assignments|textbook)\b/gi
 
 function soleCourse(text: string, user: User): string | null {
   const [named, ...rest] = parseCourseList(text)
@@ -643,18 +673,46 @@ export class DmService {
       return true
     }
 
-    if (read.kind === 'course_list' || read.entries.length === 0) {
+    // Entries are the evidence, not the label. A week's grid is mostly course codes,
+    // so "course list" is the easy misread — and taking it discarded a fully read
+    // timetable, leaving the student enrolled in the right courses with no schedule
+    // and no sign that anything had been lost.
+    if (read.entries.length === 0) {
       const reply = await this.takeCourseList(user, read.courseKeys)
       await this.say(user.phone, message.chatJid, reply)
       return true
     }
 
+    // Their own timetable is the most authoritative statement of what they take, and
+    // apply() keeps only rows for courses they watch — so without this a first
+    // timetable is read correctly, previewed in full, and then stores nothing.
+    const added = await this.watchCoursesIn(user, read.entries)
+
     await conversationService.proposeTimetable(user.phone, read)
-    await this.say(user.phone, message.chatJid, scheduleService.preview(read, user))
+    const note = added.length
+      ? `\n\n_I've added ${added.map(courseDisplay).join(', ')} to your courses — they were on it and you weren't watching them._`
+      : ''
+    await this.say(user.phone, message.chatJid, `${scheduleService.preview(read, user)}${note}`)
     return true
   }
 
   /** A photographed course list, which is a request to watch those courses. */
+  /** Adds the courses a photographed timetable names but the student is not watching. */
+  private async watchCoursesIn(user: User, entries: ReadTimetable['entries']): Promise<string[]> {
+    const named = [
+      ...new Set(
+        entries.map((entry) => entry.courseKey).filter((key): key is string => Boolean(key)),
+      ),
+    ]
+    const fresh = named.filter((key) => !user.courseKeys.includes(key))
+    if (fresh.length === 0) return []
+
+    user.courseKeys = [...user.courseKeys, ...fresh]
+    await userRepository.upsert(user)
+    logger.info({ phone: user.phone, fresh }, 'courses added from a timetable')
+    return fresh
+  }
+
   private async takeCourseList(user: User, courseKeys: string[]): Promise<string> {
     const fresh = courseKeys.filter((key) => !user.courseKeys.includes(key))
     if (courseKeys.length === 0) {
@@ -935,7 +993,7 @@ If I got a code wrong, send *remove <code>*.`
     // Their own words, not the whole message: "can you get one more" carries no
     // subject, and a query built from it collapses back onto the course number.
     const words = subjectWords(text)
-    if (scoped) await this.learnTitle(scoped, words)
+    if (scoped) await this.learnTitle(scoped, titleAfterCode(text, scoped))
     await conversationService.offerWebSearch(user.phone, words)
 
     return `${before}Want me to look outside your group? I can search the web for *${course}* material and send you what I find.
@@ -953,18 +1011,12 @@ Send *yes* and I'll look.`
    * search falls back to the number, which is what matched Math 575 in the first
    * place. A title already on record is never overwritten: it came from a document.
    */
-  private async learnTitle(courseKey: string, words: string): Promise<void> {
-    const parts = words.split(/\s+/).filter((word) => /^[a-z]{4,}$/i.test(word))
-    if (parts.length < 2) return
-    if ((await courseService.find(courseKey))?.title) return
+  private async learnTitle(key: string, title: string): Promise<void> {
+    if (!title) return
+    if ((await courseService.find(key))?.title) return
 
     await courseService.learn([
-      {
-        courseKey,
-        code: courseDisplay(courseKey) ?? courseKey,
-        title: parts.join(' '),
-        lecturer: null,
-      },
+      { courseKey: key, code: courseDisplay(key) ?? key, title, lecturer: null },
     ])
   }
 
@@ -989,6 +1041,22 @@ Send *yes* and I'll look.`
     )
 
     if (found.length === 0) {
+      // Nothing new, but something already found. Saying only "I couldn't find
+      // anything" leaves them empty-handed over a list they may never have seen — the
+      // message carrying it can be lost to a dropped socket, and asking again is
+      // exactly what somebody does when that happens.
+      if (already.length > 0) {
+        await conversationService.rememberFindings(user.phone, already)
+        await this.say(
+          user.phone,
+          jid,
+          `Nothing new beyond what I already found. Here it is again 👇
+
+${listFindings(already)}`,
+        )
+        return
+      }
+
       await conversationService.rememberFindings(user.phone, [])
       // Named, because "nothing found" for a course whose subject Peermate does not
       // know is a different problem from one where the web genuinely has nothing.
@@ -996,7 +1064,7 @@ Send *yes* and I'll look.`
       await this.say(
         user.phone,
         jid,
-        `I looked, but I couldn't find a PDF ${about ? `about *${about}*` : `for *${course}*`} worth sending${already.length > 0 ? ' on top of those' : ''}.
+        `I looked, but I couldn't find a PDF ${about ? `about *${about}*` : `for *${course}*`} worth sending.
 
 ${about ? "Tell me the topic more exactly and I'll try again" : `Tell me what *${course}* is actually about — the course title — and I'll search on that instead`}.`,
       )
@@ -1010,17 +1078,12 @@ ${about ? "Tell me the topic more exactly and I'll try again" : `Tell me what *$
     }))
     await conversationService.rememberFindings(user.phone, findings)
 
-    const lines = findings.map((item) => `${item.position}. *${item.title}*\n   ${item.url}`)
     await this.say(
       user.phone,
       jid,
       `Found ${findings.length} PDF${findings.length === 1 ? '' : 's'} on *${course}* 🌐
 
-${lines.join('\n\n')}
-
-_From the web, not from your group._
-
-Send *1*, *send 1 and 3*, or *all* and I'll send them over.`,
+${listFindings(findings)}`,
     )
   }
 
