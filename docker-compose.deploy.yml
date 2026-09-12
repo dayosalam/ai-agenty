@@ -1,0 +1,59 @@
+# Peermate on a server. Mongo is hosted (Atlas, from MONGODB_URL in .env); MinIO and
+# Chroma run here, reachable only from inside this network — nothing about them needs
+# to be on the public internet, and a publicly addressable object store is a liability
+# rather than a feature.
+#
+#   docker compose -f docker-compose.deploy.yml up -d --build
+#   docker compose -f docker-compose.deploy.yml logs -f app    # pairing code lands here
+
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Service names, not the public hostnames — traffic never leaves the host, so
+      # there is no TLS to terminate and no certificate to keep alive.
+      CHROMA_URL: http://chroma:8000
+      MINIO_ENDPOINT: minio:9000
+      MINIO_USE_SSL: "false"
+      WHATSAPP_AUTH_DIR: /app/auth_state
+      ENVIRONMENT: production
+    volumes:
+      # Losing this means re-pairing by hand from the bot's phone. Back it up.
+      - auth_state:/app/auth_state
+    ports:
+      - "3000:3000"
+    depends_on:
+      - minio
+      - chroma
+    # Chroma and MinIO take a few seconds to accept connections and the app connects
+    # to both at boot. Rather than health-gate the start — a healthcheck naming a
+    # binary the image lacks blocks it for ever — let it exit and come back.
+    restart: unless-stopped
+    deploy:
+      # Two processes against one WhatsApp session desynchronise the Signal ratchet
+      # and every student sees "Waiting for this message" with no way back.
+      replicas: 1
+      update_config:
+        order: stop-first
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9090"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  chroma:
+    image: chromadb/chroma:latest
+    volumes:
+      - chroma_data:/data
+    restart: unless-stopped
+
+volumes:
+  auth_state:
+  minio_data:
+  chroma_data:

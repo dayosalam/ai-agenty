@@ -59,6 +59,14 @@ const envSchema = z.object({
 
 const env = envSchema.parse(process.env)
 
+/**
+ * A hosted MinIO is written as a bare hostname and served on the standard port; a
+ * local one carries its port. Defaulting a missing port to 9000 makes a TLS
+ * connection to a port nothing is listening on, which surfaces as a timeout rather
+ * than as anything that names the cause.
+ */
+const [minioHost, minioPort] = env.MINIO_ENDPOINT.split(':')
+
 export const config = {
   env: env.ENVIRONMENT,
   logLevel: env.LOG_LEVEL,
@@ -70,8 +78,8 @@ export const config = {
   mongo: { url: env.MONGODB_URL, database: env.MONGODB_DATABASE },
   chroma: { url: env.CHROMA_URL, collection: defaults.database.chromaCollection },
   minio: {
-    endPoint: env.MINIO_ENDPOINT.split(':')[0]!,
-    port: Number(env.MINIO_ENDPOINT.split(':')[1] ?? 9000),
+    endPoint: minioHost!,
+    port: minioPort ? Number(minioPort) : env.MINIO_USE_SSL ? 443 : 9000,
     useSSL: env.MINIO_USE_SSL,
     accessKey: env.MINIO_ACCESS_KEY,
     secretKey: env.MINIO_SECRET_KEY,

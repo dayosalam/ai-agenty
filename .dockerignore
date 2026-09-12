@@ -1,0 +1,16 @@
+# auth_state is a live WhatsApp session credential. Excluded from the build context
+# so it can never reach an image layer or a build cache, even by accident — the
+# Dockerfile mounts it as a volume instead.
+auth_state
+
+.env
+.env.*
+!.env.example
+
+node_modules
+dist
+.git
+.gitignore
+*.log
+coverage
+tests
