@@ -1,0 +1,54 @@
+{
+  "app": {
+    "name": "Peermate",
+    "version": "0.1.0"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3000
+  },
+  "database": {
+    "mongodbDatabase": "peermate",
+    "chromaUrl": "http://localhost:8000",
+    "chromaCollection": "message_embeddings"
+  },
+  "minio": {
+    "bucketMedia": "media"
+  },
+  "whatsapp": {
+    "authDir": "./auth_state"
+  },
+  "llm": {
+    "extractionModel": "gpt-4o-mini",
+    "answerModel": "gpt-4o",
+    "visionModel": "gpt-4o",
+    "transcriptionModel": "whisper-1",
+    "ttsModel": "gpt-4o-mini-tts",
+    "ttsVoice": "alloy",
+    "routingModel": "gpt-4o-mini"
+  },
+  "embeddings": {
+    "model": "text-embedding-3-small",
+    "dimension": 1536
+  },
+  "retrieval": {
+    "candidateK": 25,
+    "windowDays": 30
+  },
+  "digest": {
+    "hour": 7,
+    "minute": 0,
+    "timezone": "Africa/Lagos"
+  },
+  "ingest": {
+    "concurrency": 2
+  },
+  "resources": {
+    "alertDelaySeconds": 90
+  },
+  "delivery": {
+    "conversationActiveSeconds": 45,
+    "deferSeconds": 60,
+    "maxDeferSeconds": 480
+  }
+}

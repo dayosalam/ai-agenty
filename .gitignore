@@ -6,6 +6,8 @@
 .env.*
 **/.env
 **/.env.*
+!.env.example
+!**/.env.example
 
 # Dependencies and generated output
 node_modules/
@@ -21,3 +23,13 @@ yarn-debug.log*
 yarn-error.log*
 .npm/
 .eslintcache
+
+# Baileys auth state — a live WhatsApp session credential
+auth_state/
+**/auth_state/
+
+# Local daemon data and logs (non-Docker setup)
+.local/
+**/.local/
+chroma_data/
+minio_data/
