@@ -3,6 +3,7 @@ import { logger } from '../core/logger.js'
 import type { EventType, User } from '../models/index.js'
 import { conversationRepository } from '../repositories/index.js'
 import { isQuietHour } from '../utils/quiet.js'
+import { conversationService } from './conversation.service.js'
 import { notifierService } from './notifier.service.js'
 
 /** Things worth interrupting someone for. Everything else can wait for the digest. */
@@ -12,11 +13,15 @@ export interface Unsolicited {
   kind: 'announcement' | 'resource' | 'digest' | 'deadline'
   courseKey?: string | null
   eventType?: EventType | null
+  /** The event this alert is about, so a quoted reply to it can be resolved. */
+  eventId?: string | null
 }
 
 interface Batch {
   jid: string
   bodies: string[]
+  /** Carried through the wait so a deferred alert is still replyable when it lands. */
+  eventIds: string[]
   /** When the first held item arrived, so a long conversation cannot defer forever. */
   since: number
   timer: NodeJS.Timeout
@@ -50,11 +55,17 @@ export class DeliveryService {
       about.kind !== 'digest' &&
       (await this.midConversation(student.phone))
     ) {
-      this.defer(student.phone, student.jid, body)
+      this.defer(student.phone, student.jid, body, about.eventId ?? null)
       return false
     }
 
-    await notifierService.sendText(student.jid, body)
+    const waMessageId = await notifierService.sendText(student.jid, body)
+    // An alert is part of the thread too: "you told me it moved" refers to one of
+    // these, not to anything the student asked for.
+    await conversationService.rememberTurn(student.phone, 'peermate', body)
+    if (waMessageId && about.eventId) {
+      await conversationService.rememberAlert(student.phone, waMessageId, about.eventId)
+    }
     return true
   }
 
@@ -91,11 +102,12 @@ export class DeliveryService {
    * once and four separate "by the way" messages is worse than the interruption it
    * was avoiding.
    */
-  private defer(phone: string, jid: string, body: string): void {
+  private defer(phone: string, jid: string, body: string, eventId: string | null): void {
     const existing = this.deferred.get(phone)
     if (existing) {
       clearTimeout(existing.timer)
       existing.bodies.push(body)
+      if (eventId) existing.eventIds.push(eventId)
       existing.timer = this.schedule(phone)
       return
     }
@@ -103,6 +115,7 @@ export class DeliveryService {
     this.deferred.set(phone, {
       jid,
       bodies: [body],
+      eventIds: eventId ? [eventId] : [],
       since: Date.now(),
       timer: this.schedule(phone),
     })
@@ -147,7 +160,15 @@ export class DeliveryService {
         ? 'One thing came in while we were talking 👇'
         : `${batch.bodies.length} things came in while we were talking 👇`
 
-    await notifierService.sendText(batch.jid, `${lead}\n\n${batch.bodies.join('\n\n———\n\n')}`)
+    const held = `${lead}\n\n${batch.bodies.join('\n\n———\n\n')}`
+    const waMessageId = await notifierService.sendText(batch.jid, held)
+    await conversationService.rememberTurn(phone, 'peermate', held)
+
+    // One message carrying several alerts can only point at one event, so a reply to
+    // it resolves to the most recent — which is the one at the bottom of what they
+    // just read, and the one they are most likely replying about.
+    const [latest] = batch.eventIds.slice(-1)
+    if (waMessageId && latest) await conversationService.rememberAlert(phone, waMessageId, latest)
   }
 
   /** Sends everything pending immediately, so a shutdown loses nothing. */

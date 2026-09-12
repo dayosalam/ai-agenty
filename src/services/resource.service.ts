@@ -141,12 +141,24 @@ export class ResourceService {
     docType: DocType | 'any' = 'any',
   ): Promise<{ summary: string; files: Resource[]; tooMany: boolean }> {
     const asked = scoped ? [scoped] : parseCourseList(text)
-    const targets =
-      asked.length > 0 ? asked.filter((key) => user.courseKeys.includes(key)) : user.courseKeys
+    const mine = asked.filter((key) => user.courseKeys.includes(key))
+
+    // A course they did not register is still worth answering when the files exist.
+    // Cohorts overlap almost completely here, and refusing a classmate's past
+    // questions on a registration technicality helps nobody.
+    const borrowed: string[] = []
+    for (const key of asked.filter((key) => !mine.includes(key))) {
+      if ((await resourceRepository.forCourse(key)).length > 0) borrowed.push(key)
+    }
+
+    const targets = asked.length > 0 ? [...mine, ...borrowed] : user.courseKeys
 
     if (targets.length === 0) {
+      const named = asked.map(courseDisplay).filter(Boolean).join(', ')
       return {
-        summary: "That course isn't on your list. Send me the code and I'll check.",
+        summary: named
+          ? `You're not watching ${named} and nothing has been shared for it either. Send *add ${named}* if you want me to start watching.`
+          : "That course isn't on your list. Send me the code and I'll check.",
         files: [],
         tooMany: false,
       }
@@ -200,6 +212,11 @@ export class ResourceService {
       return { summary: lines.join('\n').trim(), files, tooMany }
     }
 
+    if (borrowed.length > 0) {
+      lines.push(
+        `_You're not registered for ${borrowed.map(courseDisplay).join(', ')} — these were shared anyway._`,
+      )
+    }
     lines.push(`Sending ${files.length} file${files.length === 1 ? '' : 's'} now 👇`)
     return { summary: lines.join('\n').trim(), files, tooMany }
   }

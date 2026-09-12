@@ -23,6 +23,43 @@ export interface Candidate {
  * window, then take a generous k and hand the LLM the whole candidate set.
  */
 export class RetrievalService {
+  /**
+   * Everything readable that was ever shared as a file for one course.
+   *
+   * Fetched by metadata rather than by similarity: preparing for a test means
+   * covering the material, and a search for "what is on the test" returns the corner
+   * of it that happens to phrase itself that way. Unreadable placeholders are
+   * returned too — a file Peermate cannot open is still worth admitting to.
+   */
+  async material(courseKey: string, limit = 150): Promise<Candidate[]> {
+    const result = await getCollection().get({
+      where: { $and: [{ courseKey: { $eq: courseKey } }, { sourceKind: { $eq: 'document' } }] },
+      limit,
+    })
+
+    const documents = result.documents ?? []
+    const metadatas = result.metadatas ?? []
+
+    return documents.flatMap((content, index) => {
+      const meta = metadatas[index]
+      if (!content || !meta) return []
+      return [
+        {
+          waMessageId: String(meta['waMessageId'] ?? ''),
+          content,
+          senderName: String(meta['senderName'] ?? 'unknown'),
+          type: String(meta['type'] ?? 'document'),
+          timestamp: new Date(Number(meta['timestampMs'] ?? 0)),
+          courseKey: String(meta['courseKey'] ?? ''),
+          sourceKind: 'document',
+          fileName: meta['fileName'] ? String(meta['fileName']) : null,
+          page: meta['page'] ? Number(meta['page']) : null,
+          readVia: String(meta['readVia'] ?? 'text'),
+        },
+      ]
+    })
+  }
+
   async search(
     question: string,
     courseKeys: string[],

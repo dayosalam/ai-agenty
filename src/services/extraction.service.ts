@@ -8,6 +8,7 @@ import { EventType } from '../models/index.js'
 import {
   calendarWindow,
   isOfferedDate,
+  isoFromAnswer,
   isPlausibleAbsoluteDate,
   type CalendarDay,
 } from '../utils/dates.js'
@@ -21,6 +22,7 @@ import { getOpenAI } from './openai.client.js'
  */
 const LlmAnnouncement = z.object({
   course: z.string().nullable(),
+  scope: z.enum(['course', 'department']),
   eventType: EventType,
   originalDateText: z.string().nullable(),
   date: z.string().nullable(),
@@ -65,7 +67,7 @@ One message can contain SEVERAL announcements — a photographed timetable or a 
 DATES. Today is ${today.label} in ${config.digest.timezone}. These are the only dates you may use:
 ${calendar}
 
-For anything said in RELATIVE terms — "Friday", "tomorrow", "next week Tuesday" — copy the "date" value exactly from that list. Never calculate a weekday yourself.
+For anything said in RELATIVE terms — "Friday", "tomorrow", "next week Tuesday" — pick the matching line from that list and return ONLY its YYYY-MM-DD part, not the weekday in front of it. Never calculate a weekday yourself.
 
 If instead the message states a date OUTRIGHT — "15 October", "20/11/2026", "the 3rd of March" — write that date as YYYY-MM-DD even though it is not in the list above, using the current year unless the message says otherwise.
 
@@ -74,6 +76,7 @@ If you cannot tell which day is meant, return null for "date". Always keep the s
 Other rules:
 - "time" is 24-hour HH:MM.
 - ${context.defaultCourse ? `This group is for ${context.defaultCourse}; use that as the course unless the message clearly names a different one.` : 'This group has no default course, so the message must name the course itself. If it does not, return null for "course".'}
+- "scope" is "course" for anything about one course, even when you cannot tell which. Use "department" ONLY when the announcement applies to every student regardless of what they study — "no lectures on Friday", "resumption is Monday", "the fees deadline is the 15th", "the department meeting is at 10". A department-wide announcement has no course, so return null for "course".
 - Null over guessing. If a venue, date or time is not stated, it is null. Never invent one.
 - A filename is not an announcement. Never infer an event from what a file might contain, or from its name.
 - Everything you report must be traceable to words actually present. If you cannot point at the phrase that states it, it is not there.
@@ -139,11 +142,17 @@ export class ExtractionService {
         ...announcement,
         // `||`, not `??`: the model returns "" as often as null for an absent course,
         // and `"" ?? fallback` is "" — which silently defeats the group default.
-        course: announcement.course || fallbackCourse,
-        courseKey: courseKey(announcement.course || fallbackCourse),
+        // A department-wide notice has no course by definition, so the group default
+        // must not be stamped onto it — that would narrow it to one course's students.
+        course: announcement.scope === 'department' ? null : announcement.course || fallbackCourse,
+        courseKey:
+          announcement.scope === 'department'
+            ? null
+            : courseKey(announcement.course || fallbackCourse),
         eventId: `${message.waMessageId}:${index}`,
         authority,
         corroboratedBy: [],
+        supersededBy: null,
         sourceMessageId: message.waMessageId,
         chatJid: message.chatJid,
         extractedAt: new Date(),
@@ -179,10 +188,17 @@ export class ExtractionService {
       ...result,
       announcements: result.announcements.map((announcement) => {
         if (announcement.date === null) return announcement
+
+        // The calendar is offered as labels, so "Tue 2026-09-22" is a correct answer
+        // to "copy the date from that list" — but only the ISO part may be stored.
+        const date = isoFromAnswer(announcement.date)
+
         // Either it chose from the calendar, or it read an explicit date off the
         // message. Anything else is arithmetic the model is not trusted to do.
-        if (isOfferedDate(announcement.date, window)) return announcement
-        if (isPlausibleAbsoluteDate(announcement.date, now)) return announcement
+        if (isOfferedDate(date, window) || isPlausibleAbsoluteDate(date, now)) {
+          return { ...announcement, date }
+        }
+
         logger.warn(
           { waMessageId, date: announcement.date, said: announcement.originalDateText },
           'model invented a date outside the offered calendar, dropping it',

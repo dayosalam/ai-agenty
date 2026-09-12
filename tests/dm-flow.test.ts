@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Conversation, Extraction, Group, Message, User } from '../src/models/index.js'
+import type { Conversation, Course, Extraction, Group, Message, User } from '../src/models/index.js'
 import type { Routed } from '../src/services/router.service.js'
 
 const PHONE = '2348100000000'
@@ -8,9 +8,11 @@ const JID = `${PHONE}@s.whatsapp.net`
 let user: User
 let conversation: Conversation | null = null
 let pendingGroups: Group[] = []
+let knownCourses: Course[] = []
 const outbox: string[] = []
 const sentFiles: string[] = []
 const proposed: Array<{ chatJid: string; course: string }> = []
+const learned: Array<{ courseKey: string; title: string | null }> = []
 
 const extraction: Extraction = {
   eventId: 'evt-1',
@@ -18,6 +20,7 @@ const extraction: Extraction = {
   chatJid: '1@g.us',
   course: 'CSC 301',
   courseKey: 'CSC301',
+  scope: 'course' as const,
   eventType: 'test',
   originalDateText: 'Friday',
   date: '2026-09-18',
@@ -26,6 +29,7 @@ const extraction: Extraction = {
   confidence: 0.9,
   authority: 'lecturer',
   corroboratedBy: [],
+  supersededBy: null,
   extractedAt: new Date(),
 }
 
@@ -55,7 +59,11 @@ vi.mock('../src/repositories/index.js', () => ({
     findByJid: vi.fn(async (jid: string) => pendingGroups.find((g) => g.chatJid === jid) ?? null),
   },
   messageRepository: { findById: vi.fn(async () => sourceMessage) },
-  extractionRepository: { findByEventId: vi.fn(async () => extraction) },
+  extractionRepository: {
+    findByEventId: vi.fn(async () => extraction),
+    dueOn: vi.fn(async () => []),
+    forCourses: vi.fn(async () => []),
+  },
   conversationRepository: {
     find: vi.fn(async () => conversation),
     save: vi.fn(async (next: Conversation) => {
@@ -64,6 +72,19 @@ vi.mock('../src/repositories/index.js', () => ({
     clear: vi.fn(async () => {
       conversation = null
     }),
+  },
+  courseRepository: {
+    forKeys: vi.fn(async () => knownCourses),
+    find: vi.fn(async () => knownCourses[0] ?? null),
+    enrich: vi.fn(async (courseKey: string, patch: { title?: string | null }) => {
+      learned.push({ courseKey, title: patch.title ?? null })
+    }),
+  },
+  scheduleRepository: {
+    forStudent: vi.fn(async () => []),
+    forCourse: vi.fn(async () => []),
+    insertMany: vi.fn(),
+    replaceKinds: vi.fn(async () => 0),
   },
   resourceRepository: {
     forCourse: vi.fn(async (key: string) =>
@@ -88,6 +109,10 @@ vi.mock('../src/services/notifier.service.js', () => ({
   notifierService: {
     sendText: vi.fn(async (_jid: string, text: string) => {
       outbox.push(text)
+      return `sent-${outbox.length}`
+    }),
+    sendDocument: vi.fn(async (_jid: string, _bytes: Buffer, fileName: string) => {
+      sentFiles.push(fileName)
     }),
     sendFile: vi.fn(async (_jid: string, _key: string, fileName: string) => {
       sentFiles.push(fileName)
@@ -111,15 +136,34 @@ vi.mock('../src/services/group.service.js', () => ({
 }))
 
 vi.mock('../src/db/minio.js', () => ({ getMedia: vi.fn(async () => Buffer.from('bytes')) }))
+
+let webFinds: Array<{ title: string; url: string }> = []
+let downloadable = true
+vi.mock('../src/services/research.service.js', () => ({
+  researchService: {
+    documentsFor: vi.fn(async () =>
+      webFinds.map((find) => ({ ...find, topic: 'x', extract: null })),
+    ),
+    download: vi.fn(async () =>
+      downloadable ? { bytes: Buffer.from('%PDF-1.4'), fileName: 'notes.pdf' } : null,
+    ),
+  },
+}))
 vi.mock('../src/services/openai.client.js', () => ({ getOpenAI: vi.fn() }))
 
-const answer = vi.fn(async () => 'The CSC 301 test is Friday 10am in LG7.')
+const answer = vi.fn(async (..._args: unknown[]) => 'The CSC 301 test is Friday 10am in LG7.')
 vi.mock('../src/services/qa.service.js', () => ({ qaService: { answer } }))
 
 let route: Routed
+/** Consumed in order when set, so a two-part message can route differently per half. */
+let routeQueue: Routed[] = []
 vi.mock('../src/services/router.service.js', () => ({
-  routerService: { route: async () => route },
+  routerService: { route: async () => routeQueue.shift() ?? route },
 }))
+
+// researchService itself is mocked; this only flips the "can I search?" check that
+// gates the offer, which reads the key rather than the service.
+process.env['EXA_API_KEY'] ||= 'test-key'
 
 const { dmService } = await import('../src/services/dm.service.js')
 const { conversationService } = await import('../src/services/conversation.service.js')
@@ -134,7 +178,10 @@ function routed(over: Partial<Routed>): Routed {
     filePositions: [],
     sendAll: false,
     docType: 'any',
+    outsideGroup: false,
     newName: null,
+    horizon: null,
+    correction: null,
     isFollowUp: false,
     secondRequest: null,
     confidence: 0.9,
@@ -167,10 +214,15 @@ function dm(text: string): Message {
 }
 
 beforeEach(() => {
+  routeQueue = []
+  webFinds = []
+  downloadable = true
   outbox.length = 0
   sentFiles.length = 0
   proposed.length = 0
+  learned.length = 0
   pendingGroups = []
+  knownCourses = []
   conversation = null
   answer.mockClear()
   user = {
@@ -312,11 +364,248 @@ describe('messages that are not questions', () => {
  * One intent can be acted on, so the reply has to name the half it did not do.
  * Silence about the second request reads as not having understood it.
  */
+/**
+ * People ask for two things at once. Answering one and telling them to ask again for
+ * the other is honest, but it still leaves them to ask again — so the second half is
+ * routed and acted on in its own right.
+ */
 describe('two requests in one message', () => {
-  it('answers the first and says what it did not do', async () => {
-    route = routed({ secondRequest: 'send the slides' })
+  it('answers both halves', async () => {
+    routeQueue = [
+      routed({ secondRequest: 'send the slides' }),
+      // "Send the slides" names no course; the router carries it from what they were
+      // just asking about, exactly as it does for any other follow-up.
+      routed({ intent: 'request_resources', courseCode: 'CSC 301', courseFromContext: true }),
+    ]
+
+    await dmService.handle(dm('when is the test and send the slides?'))
+    expect(outbox[0]).toMatch(/CSC301_week4\.pdf/)
+    expect(outbox.at(-1)).toMatch(/CSC 301 test is Friday/)
+    expect(outbox.at(-1)).not.toMatch(/also asked me to/i)
+  })
+
+  /** Guessing at a half-understood second request is worse than admitting to it. */
+  it('says what it did not do when the second half is unclear', async () => {
+    routeQueue = [routed({ secondRequest: 'send the slides' }), routed({ confidence: 0.2 })]
+
     await dmService.handle(dm('when is the test and send the slides?'))
     expect(outbox.at(-1)).toMatch(/also asked me to send the slides/i)
+  })
+})
+
+/**
+ * WhatsApp's Reply quotes a specific message. Somebody scrolling back to an alert from
+ * Tuesday and replying to it means that one — which is exactly the case the 45-minute
+ * context cannot cover, because the whole point is that it is not the current subject.
+ */
+describe('replying to a specific alert', () => {
+  it('answers about the alert they quoted, not the last thing discussed', async () => {
+    conversation = {
+      phone: PHONE,
+      alerts: [{ waMessageId: 'alert-7', eventId: 'evt-1' }],
+      turns: [],
+      files: [],
+      findings: [],
+      updatedAt: new Date(),
+    } as unknown as Conversation
+    route = routed({ intent: 'ask_question', isFollowUp: false })
+
+    await dmService.handle({ ...dm('is it still holding?'), quotedMessageId: 'alert-7' })
+
+    // Third argument is the focus: the event the alert was about.
+    expect(answer.mock.calls[0]![2]).toMatchObject({ extraction: { eventId: 'evt-1' } })
+  })
+
+  it('ignores a quote of something that was never an alert', async () => {
+    route = routed({ intent: 'ask_question', isFollowUp: false })
+    await dmService.handle({ ...dm('what about this?'), quotedMessageId: 'not-an-alert' })
+    expect(answer.mock.calls[0]![2]).toBeNull()
+  })
+})
+
+describe('a message with nothing to attach it to', () => {
+  /** They expected something to happen. Silence looks like it did. */
+  it('says what a stray yes is not an answer to', async () => {
+    await dmService.handle(dm('yes'))
+    expect(outbox.at(-1)).toMatch(/Yes to what\?/)
+  })
+
+  it('leaves an acknowledgement alone', async () => {
+    route = routed({ intent: 'smalltalk' })
+    await dmService.handle(dm('ok'))
+    expect(outbox.at(-1)).not.toMatch(/Yes to what/)
+  })
+
+  /** A code typed into a quiet chat is a request about that course, not a search term. */
+  it('gives a rundown for a course code on its own', async () => {
+    await dmService.handle(dm('CSC 301'))
+    expect(outbox.at(-1)).toMatch(/\*CSC 301\*/)
+    expect(answer).not.toHaveBeenCalled()
+  })
+
+  it('still treats a question that names a course as a question', async () => {
+    route = routed({ intent: 'ask_question', courseCode: 'CSC 301' })
+    await dmService.handle(dm('when is the CSC 301 test?'))
+    expect(answer).toHaveBeenCalled()
+  })
+})
+
+/**
+ * Peermate was added to one group and told to listen there. Answering "have you got
+ * the notes?" with something off the internet — unasked and not what their lecturer
+ * set — is a different product from the one they agreed to.
+ */
+describe('material from outside the group', () => {
+  it('offers to look rather than looking', async () => {
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+    await dmService.handle(dm('can you send me some external material?'))
+
+    expect(outbox.at(-1)).toMatch(/look outside your group/i)
+    expect(outbox.at(-1)).toMatch(/extra reading/i)
+    expect(conversation?.pendingAction).toBe('confirm_web_search')
+  })
+
+  it('offers when the group has nothing for that course', async () => {
+    route = routed({ intent: 'request_resources', courseCode: 'STA 202' })
+    await dmService.handle(dm('STA 202 resources'))
+    expect(outbox.at(-1)).toMatch(/look outside your group/i)
+  })
+
+  /**
+   * Nobody photographed a timetable for this course, so the only place its name has
+   * ever appeared is the student's own message. Without it the next search falls back
+   * to the number, which is what returned a Math 575 review sheet for a
+   * transportation engineering course.
+   */
+  it('takes the course title from their own words when it has none', async () => {
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('get me external material for CSC 301 data structures'))
+    expect(learned).toContainEqual({ courseKey: 'CSC301', title: 'data structures' })
+  })
+
+  it('never overwrites a title that came from a document', async () => {
+    knownCourses = [
+      {
+        courseKey: 'CSC301',
+        code: 'CSC 301',
+        title: 'Algorithms and Complexity',
+        lecturer: null,
+        aliases: [],
+        updatedAt: new Date(),
+      },
+    ]
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('external material for CSC 301 data structures'))
+    expect(learned).toHaveLength(0)
+  })
+
+  it('takes no for an answer', async () => {
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+    await dmService.handle(dm('find me something online'))
+    await dmService.handle(dm('no'))
+
+    expect(outbox.at(-1)).toMatch(/stick to what your group shares/i)
+    expect(conversation?.pendingAction).toBeNull()
+  })
+
+  it('lists what it found, labelled, and sends nothing yet', async () => {
+    webFinds = [
+      { title: 'Intro to Algorithms notes', url: 'https://example.edu/a.pdf' },
+      { title: 'Past questions 2023', url: 'https://example.edu/b.pdf' },
+    ]
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('any external material?'))
+    await dmService.handle(dm('yes'))
+
+    expect(outbox.at(-1)).toMatch(/Found 2 PDFs/)
+    expect(outbox.at(-1)).toMatch(/not from your group/i)
+    expect(sentFiles).toHaveLength(0)
+    expect(conversation?.pendingAction).toBe('choose_web_file')
+  })
+
+  it('sends the one they picked', async () => {
+    webFinds = [
+      { title: 'Intro to Algorithms notes', url: 'https://example.edu/a.pdf' },
+      { title: 'Past questions 2023', url: 'https://example.edu/b.pdf' },
+    ]
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('external material please'))
+    await dmService.handle(dm('yes'))
+    await dmService.handle(dm('2'))
+
+    expect(sentFiles).toEqual(['notes.pdf'])
+  })
+
+  /** A .pdf URL is a claim. What comes back is as often a login wall. */
+  it('names what it could not download rather than counting it', async () => {
+    webFinds = [{ title: 'Past questions 2023', url: 'https://example.edu/b.pdf' }]
+    downloadable = false
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('external material please'))
+    await dmService.handle(dm('yes'))
+    await dmService.handle(dm('1'))
+
+    expect(sentFiles).toHaveLength(0)
+    expect(outbox.at(-1)).toMatch(/couldn't download \*Past questions 2023\*/)
+  })
+
+  it('does not read an ordinary question as picking from the list', async () => {
+    webFinds = [{ title: 'Notes', url: 'https://example.edu/a.pdf' }]
+    route = routed({
+      intent: 'request_resources',
+      courseCode: 'CSC 301',
+      courseFromContext: true,
+      outsideGroup: true,
+    })
+
+    await dmService.handle(dm('external material please'))
+    await dmService.handle(dm('yes'))
+
+    route = routed({ intent: 'ask_question', courseCode: 'CSC 301' })
+    await dmService.handle(dm('when is the CSC 301 test?'))
+
+    expect(sentFiles).toHaveLength(0)
+    expect(answer).toHaveBeenCalled()
   })
 })
 
@@ -471,5 +760,39 @@ describe('when it cannot make sense of a spoken message', () => {
     await dmService.handle(dm('hmm'))
 
     expect(outbox.at(-1)).not.toMatch(/I heard/)
+  })
+})
+
+/**
+ * The regression: "is there any material for the course?" was answered with "you're
+ * not watching CSC 301". The router's own prompt is dense with example codes, and
+ * asked to fill a courseCode slot for a message naming no course it returned one of
+ * them. Confirmed against the live model — with no context it invents CSC 301, and it
+ * has also returned "/" as a course code.
+ */
+describe('a course code the student never typed', () => {
+  it('is ignored rather than answered about', async () => {
+    route = routed({ intent: 'request_resources', courseCode: 'CSC 301' })
+    await dmService.handle(dm('is there any material for the course ?'))
+
+    expect(outbox.at(-1)).not.toMatch(/not watching/i)
+    expect(outbox.at(-1)).toMatch(/Which course/i)
+  })
+
+  it('still corrects a student who really did type a course they dropped', async () => {
+    route = routed({ intent: 'ask_question', courseCode: 'MTH 101' })
+    await dmService.handle(dm('when is the MTH 101 test?'))
+
+    expect(outbox.at(-1)).toMatch(/not watching \*MTH 101\*/i)
+  })
+
+  it('takes the course from context when the message names none', async () => {
+    await conversationService.rememberCourse(PHONE, 'STA202')
+
+    route = routed({ intent: 'ask_question', courseCode: null })
+    await dmService.handle(dm('is there any material for the course ?'))
+
+    const [, scope] = answer.mock.calls[0] as unknown as [string, string[]]
+    expect(scope).toEqual(['STA202'])
   })
 })

@@ -33,6 +33,14 @@ const EVERYTHING = /^(everything|all alerts|send everything|tell me everything|a
 
 const QUIET = /^quiet\b/i
 
+/**
+ * Demo aid, matched case-sensitively and exactly.
+ *
+ * Reminders are the one feature that cannot be shown on camera without waiting for
+ * the clock. Shouted in capitals so it can never collide with something a student
+ * would actually type.
+ */
+
 const NAME = /^(call me|change my name|my name is|i'?m called|rename me|change name)\b/i
 
 /** Checked before REMOVE, which would otherwise read "remove everything" as a course. */
@@ -68,9 +76,14 @@ _"what's due this week?"_
 
 *Get the files*
 _"CSC 301 resources"_ — sends the actual documents
+_"any external material?"_ — I'll offer to look outside your group
 
 *Catch up*
 _"what did I miss this week?"_
+
+*Revise for a test*
+_"prep me for CSC 301"_ — a practice set from the files people shared
+_"quiz me"_ — I ask them one at a time and mark your answers
 
 *Manage your courses*
 *my courses* · *add MTH 101* · *remove STA 202*

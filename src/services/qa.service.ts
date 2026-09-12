@@ -33,10 +33,19 @@ Rules:
 - Be short. This is a WhatsApp DM, not an essay. Two or three lines is usually right.
 - Always write times on a 12-hour clock — "10am", "5:30pm", "11:59pm" — never "17:00" or "23:59".
 - Do not use markdown headings or bullet characters other than •. WhatsApp shows *bold* with single asterisks.
+- The ABOUT THE STUDENT block is fact, not a message somebody sent. Use it freely to answer "when is my lecture?", "who teaches this?", "what have I got today?" — those answers come from their own record and need no citation. Never cite it as though somebody said it in a group.
+- If that block says Peermate is in no group for a course, and the question is about that course, say exactly that rather than reporting an empty search. The student needs to know it cannot hear, not that nothing happened.
+- THE CHAT SO FAR is your own earlier conversation with this student, not something said in a group. Use it to understand what they mean — "the one you mentioned", "you said Thursday", "the other course" — and to avoid repeating an answer they already have. Never cite it as a source for a fact about a course; if a claim's only support is your own earlier reply, say where that reply came from or say you are not sure.
 - When a block is marked THIS IS WHAT THEY WERE JUST TOLD, the question is about that and nothing else. "Where is it?", "who said that?", "what time?", "are you sure?" all refer to it. Answer from that block first and use the other messages only to add to it. If the detail they asked for is genuinely not there — no venue was ever given, say — say that about this specific event rather than answering about a different one.`
 
 export class QaService {
-  async answer(question: string, courseKeys: string[], focus?: Focus | null): Promise<string> {
+  async answer(
+    question: string,
+    courseKeys: string[],
+    focus?: Focus | null,
+    profile?: string | null,
+    history?: string | null,
+  ): Promise<string> {
     const candidates = await retrievalService.search(question, courseKeys)
 
     // A follow-up about a known event is answerable from the event itself, even when
@@ -53,6 +62,10 @@ export class QaService {
         {
           role: 'user',
           content: [
+            profile ? `ABOUT THE STUDENT:\n${profile}\n` : '',
+            history
+              ? `THE CHAT SO FAR (oldest first, their newest message last):\n${history}\n`
+              : '',
             `Question: ${question}`,
             focus ? `\nTHIS IS WHAT THEY WERE JUST TOLD:\n${describeFocus(focus)}` : '',
             `\nMessages:\n${format(candidates)}`,

@@ -31,6 +31,10 @@ const envSchema = z.object({
 
   OPENAI_API_KEY: z.string().default(''),
 
+  // Exa. Optional: with no key, prep is built from the shared files alone and the
+  // further-reading section is simply absent.
+  EXA_API_KEY: z.string().default(''),
+
   INGEST_CONCURRENCY: z.coerce.number().default(defaults.ingest.concurrency),
 
   // Off during a live demo: an alert held for a minute looks like an alert that
@@ -75,6 +79,7 @@ export const config = {
   },
   whatsapp: { authDir: env.WHATSAPP_AUTH_DIR, pairingNumber: env.WHATSAPP_PAIRING_NUMBER },
   openai: { apiKey: env.OPENAI_API_KEY, ...defaults.llm },
+  research: { apiKey: env.EXA_API_KEY, enabled: env.EXA_API_KEY !== '', ...defaults.research },
   embeddings: defaults.embeddings,
   retrieval: defaults.retrieval,
   /** How long a group must fall quiet before new files are announced as one batch. */

@@ -13,7 +13,16 @@ export class ExtractionRepository extends BaseRepository<Extraction> {
 
   async forCourses(courseKeys: string[], since: Date): Promise<Extraction[]> {
     return this.collection
-      .find({ courseKey: { $in: courseKeys }, extractedAt: { $gte: since } } as never)
+      .find({
+        // A department notice has no course, so filtering by course alone would drop
+        // it from every digest. Not narrowed further because a student record carries
+        // no department — see departmentAudience, which makes the same approximation.
+        $or: [{ courseKey: { $in: courseKeys } }, { scope: 'department' }],
+        extractedAt: { $gte: since },
+        // A row that was corrected must not reach a digest or an answer, or the
+        // student is told a venue that moved two days ago.
+        supersededBy: null,
+      } as never)
       .sort({ extractedAt: -1 })
       .toArray() as Promise<Extraction[]>
   }
@@ -83,6 +92,53 @@ export class ExtractionRepository extends BaseRepository<Extraction> {
     }
   }
 
+  /**
+   * An earlier telling of this event that says something different.
+   *
+   * Distinct from findSimilar, which looks for the *same* event told twice. This
+   * looks for the same event whose stated time or venue has since changed — the
+   * "test moved to LG8" case, which findSimilar deliberately refuses to merge
+   * because two different venues are not one event.
+   */
+  async findChanged(candidate: Extraction): Promise<Extraction | null> {
+    if (!candidate.courseKey || !candidate.date) return null
+    if (!candidate.time && !candidate.venue) return null
+
+    const differs = [
+      candidate.time ? { time: { $nin: [null, candidate.time] } } : null,
+      candidate.venue ? { venue: { $nin: [null, candidate.venue] } } : null,
+    ].filter(Boolean)
+
+    return this.collection.findOne({
+      $and: [
+        { courseKey: candidate.courseKey },
+        { eventType: candidate.eventType },
+        { date: candidate.date },
+        { eventId: { $ne: candidate.eventId } },
+        { supersededBy: null },
+        { $or: differs },
+      ],
+    } as never) as Promise<Extraction | null>
+  }
+
+  /**
+   * The courses a group has actually carried.
+   *
+   * A departmental group has no default course, so this is the only evidence of who
+   * it serves — and it is what stops a department-wide notice being broadcast to
+   * every student Peermate knows, including another department's.
+   */
+  async coursesSeenIn(chatJid: string): Promise<string[]> {
+    const keys = await this.collection.distinct('courseKey' as never, { chatJid } as never)
+    return (keys as Array<string | null>).filter((key): key is string => Boolean(key))
+  }
+
+  async supersede(eventId: string, byEventId: string): Promise<void> {
+    await this.collection.updateOne({ eventId } as never, {
+      $set: { supersededBy: byEventId } as never,
+    })
+  }
+
   async addCorroboration(eventId: string, sourceMessageId: string): Promise<void> {
     await this.collection.updateOne({ eventId } as never, {
       $addToSet: { corroboratedBy: sourceMessageId } as never,
@@ -108,7 +164,7 @@ export class ExtractionRepository extends BaseRepository<Extraction> {
 
   async dueOn(courseKeys: string[], date: string): Promise<Extraction[]> {
     return this.collection
-      .find({ courseKey: { $in: courseKeys }, date } as never)
+      .find({ courseKey: { $in: courseKeys }, date, supersededBy: null } as never)
       .toArray() as Promise<Extraction[]>
   }
 }

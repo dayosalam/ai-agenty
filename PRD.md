@@ -32,6 +32,10 @@ Undergraduates in Nigerian universities. WhatsApp is the primary and often only 
 | **Extract** | For announcements: course, event type, date, time, venue — plus source message ID, sender, timestamp. |
 | **File** | Every document that lands in a group is tagged to a course and type (slides / past questions / assignment / textbook), stored, and — for PDFs, `.docx` and scans — read, so its contents can be questioned. |
 | **Act** | DMs registered students: instant announcement alerts, a daily digest, deadline warnings with the file attached. Answers questions with citations. Sends the actual files back. |
+| **Converse** | Holds a short memory of the last exchange, so the follow-ups people actually send — *"where is it?"*, *"who said that?"*, *"send the second one"* — resolve against what was just discussed rather than starting cold. Keeps the running thread for longer, so *"you said Thursday"* has something to refer to. |
+| **Prepare** | Builds a practice set for a course out of the files people shared — what the material covers, then questions in the style the lecturer sets — and quizzes the student one question at a time, marking each answer. |
+
+**A DM can be spoken or photographed, not just typed.** Media is read before the DM and group paths diverge, so a recorded question is transcribed and a photographed timetable is OCR'd exactly as it would be in a group. A student can register by sending a picture of their timetable and ask questions without typing.
 
 **History is whatever the linked phone chooses to sync.** Baileys links as a companion device to a real WhatsApp account, so on pairing the phone pushes a history sync (`messaging-history.set`, widened by `syncFullHistory`). If the bot number was already in a group, Peermate may inherit that backlog. If the number is added to a group afterwards, WhatsApp gives it nothing prior and knowledge starts at the join.
 
@@ -145,6 +149,9 @@ The tradeoff is that the socket and the worker now share a fate. An unhandled re
 | `extractions` | every extracted event, **append-only** | `source_message_id`, `kind`, `course`, `event_type`, `original_date_text`, `date`, `time`, `venue`, `confidence`, `extracted_at` |
 | `resources` | the course library | `course`, `doc_type`, `filename`, `media_key`, `posted_by`, `posted_at`, `source_message_id` |
 | `notifications` | delivery log | `user_phone`, `extraction_id`, `notification_type`, `status`, `sent_at` |
+| `conversations` | the thread, per student | `phone`, `course_key`, `event_id`, `source_message_id`, `files[]`, `last_answer`, `turns[]`, `quiz`, `pending_action`, `updated_at` (30d TTL) |
+| `schedules` | a student's own timetable, **private to them** | `phone`, `course_key`, `kind`, `date` *or* `weekday`, `time`, `venue`, `source_message_id` |
+| `courses` | what a code means | `course_key`, `code`, `title`, `lecturer`, `aliases[]` |
 
 `extractions` are append-only. A venue change creates a new extraction rather than updating history. `messages` may be updated with transcription and processing status as the worker completes.
 
@@ -205,11 +212,265 @@ All outbound goes through `NotifierService`, the only module that touches `sock.
 
 Phone-to-JID normalisation follows `formatPhoneAsChatID` in [unimart-api](../unimart-api/internal/services/whatsapp.service.go) with the suffix changed — Nigerian local `0…` becomes `234…@s.whatsapp.net`, **not** `@c.us`. This is the same class of silent failure as `course_key`: a wrong suffix does not error, it just never arrives.
 
+### Conversation
+
+Follow-ups are the normal case, not the exception. Nobody asks "where is the CSC 301
+test on Friday?" twice; the second question is "where is it?". A per-student record
+holds the last course, event, source message, answer and file list, expiring after 45
+minutes — long enough to resolve a pronoun, short enough that a stale referent never
+produces a confident answer about the wrong event.
+
+- **An alert seeds the memory.** Every instant DM records its event against that
+  student, so the question that follows it has an antecedent. Without this the obvious
+  next message is answered against the whole course.
+- **Retrieval is not the only path.** "Repeat that" returns the stored answer verbatim
+  rather than searching again — a second search can return something different, which
+  is the one thing repeating must not do. "Send the original" returns the actual voice
+  note or photo the claim came from.
+- **Answers about Peermate never go to retrieval.** "How do I approve it?" and "what
+  group have you been approved for?" are about Peermate, not about a course; searching
+  the archive for them reports hearing nothing, which reads as broken. These are
+  answered from live state — the group actually waiting, the course somebody proposed
+  for it, the courses no group covers — before any model call.
+- **Anything Peermate asked, Peermate answers itself.** A bare "CVE 575" straight after
+  "which course?" is an answer, not a question, and leaving that to the router makes it
+  a coin flip. Pending questions are recorded and matched literally. Every one of them
+  can be abandoned by changing the subject.
+- **A group's course is confirmed before it is relayed.** What gets agreed decides
+  where a semester of announcements is filed, and the student cannot see what their
+  typed — or photographed — course code became. A different code offered at the
+  confirmation is read as a correction, not a refusal.
+- **A spoken message that cannot be understood is transcribed back.** Otherwise a voice
+  note is a black box: the student cannot tell a misunderstood request from a misheard
+  word, and on a short recording it is almost always the latter.
+
+### Remembering the conversation
+
+Two different memories, governed by different rules, because they fail differently.
+
+**Referents expire.** The last course, event, source message, answer and file list are
+held for 45 minutes. A stale "it" is worse than no "it": it produces a confident answer
+about the wrong event, and the student has no way to tell.
+
+**The thread does not.** The last twenty exchanges are kept verbatim, both sides, and
+survive that expiry. A transcript cannot be wrong in the way a referent can — it is
+only ever a record of what was said. Without it, "you said Thursday", "the one you
+mentioned earlier" and "what did I ask you yesterday?" are unanswerable, and every
+message starts from nothing.
+
+- **Every reply is in it, not just the ones a model wrote.** A file listing, a command
+  reply and a pushed alert are all things Peermate said. "You told me it moved" refers
+  to an alert nobody asked for.
+- **Each line is stamped.** The model can see that an exchange was three days ago and
+  weigh it accordingly, instead of treating it as something just said.
+- **It is history, never a source.** The router and the answerer both get the thread,
+  with an explicit rule: use it to understand what is being referred to, never to
+  support a claim about a course. An answer whose only backing is Peermate's own
+  earlier reply is a citation of itself.
+- **Turns are clipped and capped.** 500 characters each, forty of them, oldest dropped
+  first. A digest runs to hundreds of words and would otherwise crowd out the question.
+
+### Preparing for a test
+
+The files are already read, chunked by page and indexed — that is how questions about
+them get answered. The same material answers a bigger question: *am I ready?*
+
+- **Material, not memory.** Questions are built from the chunks of the actual files
+  for that course, fetched by metadata rather than by similarity — revising means
+  covering the material, and a search for "what is on the test" returns only the corner
+  of it that phrases itself that way. A model asked to prepare somebody for "CVE 575"
+  with no files writes a plausible syllabus out of its own memory and prepares them
+  confidently for an exam nobody is setting.
+- **No files, no practice set.** A course with nothing shared is told so, and asked for
+  the files. Files Peermate holds but could not read are named, and offered.
+- **Past papers lead.** They are what the test actually looks like, so they are sampled
+  first. The rest of the sample is spread across files rather than taken in order — the
+  first forty chunks of a slide deck are its introduction.
+- **The answer is always shown.** Right, close or wrong, the correct answer and its
+  page follow. Being told only "wrong" teaches nothing, and a student revising alone
+  has nowhere else to look.
+- **The set is built once and kept.** The same material asked twice produces different
+  questions, so a quiz rebuilt each turn would be a different quiz each turn and the
+  running score would mean nothing.
+
+### Replying to a specific alert
+
+WhatsApp's Reply quotes a message by id. A student scrolling back to Tuesday's alert
+and replying to it means *that* one — which is precisely the case the 45-minute
+context cannot cover, because the whole point of using Reply is that it is not the
+current subject.
+
+Each delivered alert is recorded against the student with the id WhatsApp gave it, so
+a quoted reply resolves to the event it was about. Fifty are kept — far enough back to
+cover any message still worth replying to. A quoted reply is treated as a follow-up
+whatever the router makes of the words, because the student pointed at the message.
+
+One outbound message carrying several batched alerts can only point at one event, so a
+reply to it resolves to the most recent — the one at the bottom of what they just read.
+
+### Two requests in one message
+
+People ask for two things at once. Only one intent can be acted on, so the second is
+routed and acted on in its own right — one extra round, never a third. When that
+routing is not confident, or the course is ambiguous, the reply says plainly what went
+unanswered instead of guessing at it. Admitting the gap is the fallback, not the plan.
+
+### Exa — widening the explanation, never the syllabus
+
+Exa is given the topics the course files raised, and nothing else.
+
+**Material from outside the group is offered, never substituted.** Peermate was added
+to one group and told to listen there; answering "have you got the notes?" with
+something off the internet — unasked, unlabelled, and not what their lecturer set — is
+a different product from the one the student agreed to. So a course with no files, or
+an outright request for external material, gets a question first. Only on a yes does it
+search, and what comes back is a numbered list to pick from rather than files that
+simply arrive.
+
+**A course code is not a subject.** "CVE 575" is a local invention: it means nothing
+outside the university that issued it, and a web search on it matches MATH 575 just as
+happily — which is what a student asking for transportation engineering material got.
+So the search is built from the course *title* and the student's own words, with the
+code dropped entirely once a title is known, and every result is checked for at least
+one word of the subject before it is offered. A Math 575 review sheet offered for a
+transportation course is not a near miss; it is the wrong subject, and the student
+cannot tell before they open it.
+
+When no title is on record, the request itself supplies one — "material for CVE 575
+transportation engineering" is often the only place that name has ever appeared. A
+title that came from a document is never overwritten by one taken from a message.
+
+**"Can you get one more" is not a fresh decision.** They already consented, so it
+searches again straight away, excluding what it has already offered.
+
+A URL ending in `.pdf` is a claim: what comes back is as often a login wall or an error
+page. The bytes have to begin with `%PDF-` and fit under the size cap before anything
+is sent, and a file that fails is **named** rather than counted, because the link is
+still in the list for the student to open themselves. Nothing fetched is stored — it
+belongs to whoever published it, and keeping copies would quietly turn Peermate into a
+library of other people's documents.
+
+It never sees the student's question, never contributes a quiz question, and never
+supplies a fact Peermate repeats as its own. What comes back is a link, printed under
+*Going deeper (from the web, not from your files)*, for the student to decide about.
+
+That boundary is the whole design. A student revising has to know which lines came from
+their lecturer's notes and which came from a stranger's blog, because only one of those
+is what they will be tested on. Searches are framed by the course — "modulus" alone
+returns finance, not engineering — and a failed or slow search removes the section
+rather than the prep. With no `EXA_API_KEY`, the feature is simply absent.
+
+### The student's own timetable
+
+A student photographs their exam timetable and sends it in a DM. That is a different
+thing from a lecturer posting one in a group, and it is stored separately.
+
+**A DM upload is private to the student who sent it.** It may list courses nobody else
+takes, it may be a draft, and its dates come from OCR of somebody's handwriting.
+Treating it as an announcement would make one student's misread photograph into the
+whole class's exam date — so it lands in `schedules`, keyed to them, and never reaches
+another student. A timetable posted in a *group* still goes the announcement route,
+because somebody said it to everybody.
+
+**The picture is classified before anything is read out of it** — course list, exam
+timetable, class timetable, or none of those — for the same reason extraction commits
+to `kind` first. A blurred or cropped photo is marked unreadable and produces nothing,
+rather than a confident schedule assembled from guesses.
+
+**Weekly items store a weekday, dated items store a date.** A lecture recurring every
+Tuesday is one row, not fifteen. Dates are chosen from an offered calendar exactly as
+in extraction; anything outside it is dropped to null rather than becoming a reminder
+that fires on a day nobody named.
+
+**Nothing is stored until the student confirms it.** They cannot see what the OCR made
+of their handwriting, and a silently accepted misreading surfaces weeks later as a
+reminder for the wrong day.
+
+**"Next" means next, not next dated.** A weekly class carries a weekday and no date,
+so counting only dated rows answers "nothing on your timetable" to somebody with a
+lecture in the morning. The next occurrence of a weekly row is as real as a date
+written on an exam sheet, and what a group announced is weighed alongside both.
+
+**A question about "my" timetable is about all of it.** Only a course the student names
+in that message narrows it. A course carried over from the previous exchange turns
+"when is my next class?" into an answer about one course, which reads as Peermate
+having forgotten the rest of their timetable.
+
+### Reminders
+
+Announcements tell a student something exists. Reminders are what stop them missing
+it anyway.
+
+Two sources, one path: events extracted from group announcements, and the student's
+own uploaded timetable. Both are filtered through the same delivery gate as everything
+else, so a pause or quiet hours holds a reminder exactly as it holds an alert.
+
+Lead times differ by what is being missed — an exam is worth a day's warning, a
+lecture is worth an hour's — and every reminder is recorded so a restart, a second
+scheduler pass or a manual run cannot send it twice.
+
+### Knowing which course they mean
+
+Students do not say "CVE 575". They say "structural analysis", or "Dr Bello's course".
+Course matching is on `courseKey` everywhere, and a near-miss returns nothing and
+raises nothing, so without somewhere to put titles and lecturers those questions fail
+silently rather than visibly.
+
+`courses` holds the code, title, lecturer and any aliases, assembled from whatever
+arrives — titles from a photographed timetable, lecturers from a group's trusted
+senders. Resolution only ever returns a course the student actually takes, and a title
+match must share a *phrase* rather than a single word: "analysis" appears in three
+course titles, "structural analysis" in one. Two courses matching equally well is a
+real ambiguity, and Peermate asks rather than picking.
+
+Asked about a course, it answers with coverage rather than trivia: whether it is even
+reading a group for it, the weekly pattern, what is coming up, and how much it holds.
+
+### Departmental groups
+
+A group that serves a whole department rather than one course. It is set up by
+approving it with no course — the extractor then works the course out per message,
+and asks when it cannot.
+
+Such a group carries two kinds of message, and they are not the same kind of fact:
+
+- **About one course.** "CVE 575 test moved to LG8" is filed and delivered exactly as
+  it would be from a course group — only CVE 575 students hear it.
+- **About everybody.** "No lectures on Friday", "resumption is Monday", "the fees
+  deadline is the 15th". These have no course to file under, which is
+  *indistinguishable from a course that could not be worked out* unless the extractor
+  says which it meant. So every announcement carries a `scope`, decided at extraction
+  time. A department notice is delivered rather than held for triage, and labelled as
+  department-wide so it does not read as a course announcement with its course
+  missing.
+
+**Who a department notice reaches.** A student record carries no department, so the
+group's own history stands in: whoever takes a course that group has actually carried.
+It is an approximation, and a deliberate one — the alternative is broadcasting to every
+student Peermate knows, which would send a civil engineering notice to the biology
+cohort. Before the group has carried anything there is nothing to narrow by, and it
+goes to everyone registered.
+
+Department notices are never deduped or superseded against course announcements: two
+unrelated notices are not one event told twice.
+
+### Sending files
+
+**A course they did not register still gets answered**, when the files exist. Cohorts
+here overlap almost completely, and refusing a classmate's past questions on a
+registration technicality helps nobody. The reply says plainly that they are not
+registered for it.
+
+**Files are offered, not pushed.** Earlier the shelf sent everything up to a limit
+automatically, which on metered data spends a student's money on attachments they did
+not ask for. The list comes first and the files follow a yes.
+
 ### Other decisions
 
 - **One socket, one bot number.** There is no per-instance billing to economise on any more, so the constraint is operational rather than financial: one linked device, one process, one socket. Two processes against the same auth state corrupt the session and force a re-pair.
 - **There is no official migration path.** Meta's WhatsApp [Groups API](https://developers.facebook.com/documentation/business-messaging/whatsapp/groups) caps a group at **8 participants**, covers only groups the business itself creates, and requires an Official Business Account — so it cannot host a 120-person course group. Unofficial access is not a stepping stone to a sanctioned one; at scale the ban risk on the bot number is managed, not escaped.
-- **Possible later: split the directions.** Read groups through Baileys, send DMs through Meta's Cloud API on a second number, so a ban costs ingestion rather than every student's conversation. The cost is real — outside a student-opened 24-hour window every proactive DM becomes a paid, pre-approved template, which is most of them under the instant-alert policy. All outbound goes through `NotifierService`, so this stays a one-class change — and [whatsapp-integration](../ai-agenty/whatsapp-integration/), Meta's Jasper's Market sample, is Express too, with a working Cloud API send path to crib from.
+- **Possible later: split the directions.** Read groups through Baileys, send DMs through Meta's Cloud API on a second number, so a ban costs ingestion rather than every student's conversation. The cost is real — outside a student-opened 24-hour window every proactive DM becomes a paid, pre-approved template, which is most of them under the instant-alert policy. All outbound goes through `NotifierService`, so this stays a one-class change — `CloudApiService` keeps that send path wired and unused; it was ported from Meta's Jasper's Market sample, which has since been removed from this repo.
+- **One person, one address.** WhatsApp reaches a single handset two ways — by phone number and by LID — and Signal keeps a *separate ratchet per address*. Alternating between them desynchronises both, and the handset then shows "Waiting for this message. This may take a while." on everything Peermate sends; the plaintext is unrecoverable. So a person is addressed by the identity their own messages arrive on, resolved in one place (`operatorJid`). `ADMIN_PHONE` may list several spellings of the same operator — that decides who *may* command Peermate — but only one of them is ever written to.
 - **Sponsors:** OpenAI plus at most one more, used genuinely. Five shallow integrations score worse than one real one.
 
 ## 9. Demo setup

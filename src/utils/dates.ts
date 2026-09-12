@@ -16,6 +16,24 @@ export interface CalendarDay {
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
+/**
+ * The real instant a wall-clock date and time fall on in a given zone.
+ *
+ * The offset is measured at that instant rather than assumed: Lagos does not observe
+ * daylight saving, but the server might, and a schedule built on the server's idea of
+ * 8am reminds a student an hour late twice a year.
+ */
+export function zonedInstant(date: string, time: string, timeZone: string): Date | null {
+  if (!/^\d{2}:\d{2}$/.test(time) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+
+  const naive = new Date(`${date}T${time}:00Z`)
+  if (Number.isNaN(naive.getTime())) return null
+
+  const local = new Date(naive.toLocaleString('en-US', { timeZone }))
+  const utc = new Date(naive.toLocaleString('en-US', { timeZone: 'UTC' }))
+  return new Date(naive.getTime() + (utc.getTime() - local.getTime()))
+}
+
 /** Date parts as they read in the given timezone, not the server's. */
 export function zonedDay(date: Date, timeZone: string): CalendarDay {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -44,6 +62,19 @@ export function calendarWindow(from: Date, timeZone: string, days = 14): Calenda
     window.push(zonedDay(new Date(from.getTime() + offset * DAY_MS), timeZone))
   }
   return window
+}
+
+/**
+ * The ISO date out of whatever the model actually returned.
+ *
+ * The calendar is offered as labels — "Tue 2026-09-22" — because the weekday is what
+ * stops the model doing its own arithmetic. Asked to copy a value from that list, it
+ * quite reasonably copies the whole label. Validating the raw string then rejects a
+ * date that was chosen correctly, and the event silently loses its date.
+ */
+export function isoFromAnswer(value: string | null | undefined): string | null {
+  if (!value) return null
+  return /(\d{4}-\d{2}-\d{2})/.exec(value)?.[1] ?? null
 }
 
 /**

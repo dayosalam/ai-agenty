@@ -9,6 +9,10 @@ export const Intent = z.enum([
   'request_resources',
   'send_original',
   'repeat',
+  'course_info',
+  'my_timetable',
+  'prep_test',
+  'update_timetable',
   'catch_up',
   'list_courses',
   'add_course',
@@ -39,8 +43,41 @@ const RoutedSchema = z.object({
   sendAll: z.boolean(),
   /** "slides", "past questions" — narrows a shelf that would otherwise flood. */
   docType: z.enum(['slides', 'past_questions', 'assignment', 'textbook', 'any']),
+  /** True when they are asking for material from beyond their own group. */
+  outsideGroup: z.boolean(),
   /** What they want to be called, when they are asking to be called something else. */
   newName: z.string().nullable(),
+  /** How far ahead "my_timetable" is asking. Null for every other intent. */
+  horizon: z
+    .enum([
+      'today',
+      'tomorrow',
+      'week',
+      'next',
+      'monday',
+      'tuesday',
+      'wednesday',
+      'thursday',
+      'friday',
+      'saturday',
+      'sunday',
+    ])
+    .nullable(),
+  /** What to change on their stored timetable. Null for every other intent. */
+  correction: z
+    .object({
+      kind: z.enum(['exam', 'test', 'lecture', 'tutorial', 'practical', 'any']),
+      /** 24-hour "10:00". Null when the time is not what changed. */
+      time: z.string().nullable(),
+      venue: z.string().nullable(),
+      /** "Monday" etc, when a weekly class moved day. */
+      weekday: z.string().nullable(),
+      /** YYYY-MM-DD, when a dated item moved. Pick from the calendar offered. */
+      date: z.string().nullable(),
+      /** True when they are asking to delete it rather than change it. */
+      remove: z.boolean(),
+    })
+    .nullable(),
   /** A follow-up leaning on the previous answer rather than starting fresh. */
   isFollowUp: z.boolean(),
   /**
@@ -56,8 +93,12 @@ const SYSTEM = `You route WhatsApp messages a Nigerian university student sends 
 
 Pick ONE intent:
 - "ask_question" — asking about something that was announced. "when is the CSC 301 test?", "where is it holding?", "what did the lecturer say in the voice note?"
-- "request_resources" — asking for the actual files. "CSC 301 resources", "send me the past questions", "abeg share the slides"
+- "request_resources" — asking for the actual files, whether from their group or from outside it. "CSC 301 resources", "send me the past questions", "abeg share the slides", "can you send me some external material", "find me something online about it"
 - "send_original" — asking for the source of something Peermate told them, not a course file. "send me the original voice note", "forward the actual message", "let me hear it myself", "send the photo he posted"
+- "my_timetable" — asking about their OWN schedule: what they have on, and when. "what do I have today?", "any lecture tomorrow?", "when is my next exam?", "what's my week like?", "do I have class on Tuesday?". Set horizon to today, tomorrow, next, a named weekday, or week
+- "update_timetable" — correcting their OWN stored timetable in words rather than re-sending a photo. "my CVE 575 lecture is at 10 not 8", "the ABE 501 exam moved to Friday", "CVE 565 is in LT2 now", "drop the Tuesday tutorial". Fill correction with what to change
+- "prep_test" — asking to be prepared, revised or quizzed on a course from the material people shared. "prep me for the CVE 575 test", "help me study for ABE 501", "quiz me", "ask me questions", "give me practice questions", "what should I read for the test?"
+- "course_info" — asking about a course itself rather than about one event in it. "tell me about CVE 575", "what is structural analysis", "who teaches ABE 501", "what have I got for CSC 301"
 - "repeat" — asking for the last answer again, unchanged. "repeat that", "say that again", "come again", "what did you say?"
 - "catch_up" — asking what has been happening generally, over a period. "what did I miss this week?", "give me a rundown", "anything happening in my groups?", "catch me up"
 - "list_courses" — "what courses am I watching?", "my courses"
@@ -80,7 +121,13 @@ For "catch_up", set sinceDays from the period they named: today = 1, yesterday =
 
 COURSE. Set courseCode to the course this is about — "CSC 301" style, however they wrote it (CSC301, csc-301, "data structures" if the context names it). If they did not name one but the context above says which course they were just discussing, use that and set courseFromContext true. If neither, null.
 
+OUTSIDE. Set outsideGroup true only when they ask for material from beyond their group — "external material", "anything online", "find something on the internet", "materials from outside", "textbooks I can read", "search for it". A plain "send me the CSC 301 slides" is false: that is a request for what their own group shared.
+
 FILES. When they are picking from a list just shown: "send the second one" -> filePositions [2]; "send 1 and 3" -> [1,3]; "send all"/"everything" -> sendAll true. Otherwise empty and false. Set docType when they narrow the kind — "slides", "past questions only", "the assignment brief" — else "any".
+
+CORRECTION. Set correction only for "update_timetable", and only for the fields that actually changed — everything else null. courseCode must name the course being corrected.
+
+TIMETABLE. horizon is set only for "my_timetable": "today" for today, "tomorrow" for tomorrow, "next" when they ask what is coming up next or when their next exam is, the weekday itself when they name one ("on Tuesday" -> "tuesday"), and "week" for anything broader. Null everywhere else.
 
 NAME. newName is set only for "change_name", and only to the name itself — "Ada", not "call me Ada". Null everywhere else.
 
@@ -104,15 +151,25 @@ Students write in English, Nigerian Pidgin, or a mix. Read for meaning, not gram
  * typing "status" is never subject to interpretation.
  */
 export class RouterService {
-  async route(text: string, context?: string | null): Promise<Routed> {
+  async route(text: string, context?: string | null, history?: string | null): Promise<Routed> {
     try {
+      // The thread reaches further back than `context`, which expires with the
+      // referents it holds. "You said Thursday" is about something said days ago, and
+      // routed without it the question reads as an assertion about nothing.
+      const system = [
+        SYSTEM,
+        history
+          ? `\nTHE CHAT SO FAR (oldest first; their newest message is below it):\n${history}`
+          : '',
+        context ? `\nWhat they were just discussing — ${context}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+
       const completion = await getOpenAI().beta.chat.completions.parse({
         model: config.openai.routingModel,
         messages: [
-          {
-            role: 'system',
-            content: context ? `${SYSTEM}\n\nWhat they were just discussing — ${context}` : SYSTEM,
-          },
+          { role: 'system', content: system },
           { role: 'user', content: text },
         ],
         response_format: zodResponseFormat(RoutedSchema, 'route'),
@@ -135,7 +192,10 @@ export class RouterService {
         filePositions: [],
         sendAll: false,
         docType: 'any',
+        outsideGroup: false,
         newName: null,
+        horizon: null,
+        correction: null,
         isFollowUp: false,
         secondRequest: null,
         confidence: 0,

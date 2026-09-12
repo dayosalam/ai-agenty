@@ -75,6 +75,9 @@ const TOPICS: Topic[] = [
     match: /\b(add|remove|drop|change|another)\b.*\bcourse|course.*\b(add|remove|drop)\b/i,
     answer: courses,
   },
+  // Before the resources topic, which shares most of its words: "send me the past
+  // questions" and "quiz me on the past questions" want different things.
+  { match: /\b(prep|revis\w*|study|quiz|practice|exam prep|read for)\b/i, answer: prep },
   { match: /\b(resource|file|slide|document|pdf|past ?question|note)s?\b/i, answer: resources },
   { match: /\b(digest|summary|rundown|morning|voice ?note|settings?)\b/i, answer: digest },
   { match: /\b(pause|mute|quiet|stop|snooze|silence|notification|alert)s?\b/i, answer: quiet },
@@ -84,6 +87,15 @@ const TOPICS: Topic[] = [
   },
   { match: /\bcourse/i, answer: courses },
 ]
+
+/** Revision, and the one thing it depends on. */
+function prep(): string {
+  return `Send *prep me for CSC 301* and I'll build a practice set out of the slides, notes and past questions people shared in that group — what the material covers, then questions in the style your lecturer sets.
+
+Then *quiz me* and I'll ask them one at a time and mark your answers.
+
+I can only do this for a course whose files I actually have. If nobody has posted any, send them to me yourself.`
+}
 
 /**
  * What is actually connected right now.

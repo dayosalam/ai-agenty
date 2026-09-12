@@ -52,10 +52,12 @@ export class NotifierService {
     }
   }
 
-  async sendText(jid: string, text: string): Promise<void> {
+  /** Returns the id WhatsApp gave the message, which is what a reply quotes. */
+  async sendText(jid: string, text: string): Promise<string | null> {
     this.assertNotGroup(jid)
-    await this.withRetry(() => getSocket().sendMessage(jid, { text }), jid)
+    const sent = await this.withRetry(() => getSocket().sendMessage(jid, { text }), jid)
     logger.info({ jid }, 'dm sent')
+    return sent?.key?.id ?? null
   }
 
   /**
@@ -86,13 +88,13 @@ export class NotifierService {
    * not, the retry delivers the message twice. A duplicate DM is a smaller failure
    * than a student never hearing about their test, which is the trade the PRD makes.
    */
-  private async withRetry(send: () => Promise<unknown>, jid: string): Promise<void> {
+  private async withRetry<T>(send: () => Promise<T>, jid: string): Promise<T> {
     try {
-      await send()
+      return await send()
     } catch (error) {
       logger.warn({ err: error, jid }, 'send failed, retrying once')
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
-      await send()
+      return send()
     }
   }
 
@@ -107,6 +109,29 @@ export class NotifierService {
    * A real voice note, not an audio attachment. `ptt: true` is what gives it the
    * waveform and inline play button; without it WhatsApp shows a file to download.
    */
+  /**
+   * Sends bytes Peermate is holding rather than a file out of MinIO.
+   *
+   * Used for material fetched from the web, which is never stored: it belongs to
+   * whoever published it, and keeping a copy would quietly turn Peermate into a
+   * library of other people's documents.
+   */
+  async sendDocument(
+    jid: string,
+    bytes: Buffer,
+    fileName: string,
+    mimeType: string,
+    caption?: string,
+  ): Promise<void> {
+    this.assertNotGroup(jid)
+    await this.withRetry(
+      () =>
+        getSocket().sendMessage(jid, { document: bytes, fileName, mimetype: mimeType, caption }),
+      jid,
+    )
+    logger.info({ jid, fileName, bytes: bytes.length }, 'document sent')
+  }
+
   async sendVoiceNote(jid: string, audio: Buffer): Promise<void> {
     this.assertNotGroup(jid)
     await this.withRetry(

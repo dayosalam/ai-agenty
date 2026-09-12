@@ -38,6 +38,7 @@ const STUDENT_JID = `${STUDENT_PHONE}@s.whatsapp.net`
 const outbox: string[] = []
 notifierService.sendText = async (jid, text) => {
   outbox.push(`→ ${jid}\n${text}`)
+  return null
 }
 notifierService.sendFile = async (jid, _key, fileName) => {
   outbox.push(`→ ${jid}  [file: ${fileName}]`)

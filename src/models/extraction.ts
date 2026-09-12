@@ -10,8 +10,20 @@ export const EventType = z.enum([
 ])
 export type EventType = z.infer<typeof EventType>
 
+/**
+ * Who an announcement is for.
+ *
+ * A departmental group carries both kinds. "CVE 575 test moved to LG8" belongs to one
+ * course; "no lectures on Friday" belongs to everybody, and has no course to file it
+ * under. Without this distinction the second kind looks identical to an announcement
+ * whose course could not be worked out, and gets held for triage instead of sent.
+ */
+export const Scope = z.enum(['course', 'department'])
+export type Scope = z.infer<typeof Scope>
+
 export const AnnouncementSchema = z.object({
   course: z.string().nullable(),
+  scope: Scope.default('course'),
   eventType: EventType,
   originalDateText: z.string().nullable(),
   date: z.string().nullable(),
@@ -46,6 +58,14 @@ export const ExtractionSchema = AnnouncementSchema.extend({
   authority: z.enum(['lecturer', 'rep', 'student']).default('student'),
   /** Source message ids that said the same thing after this one. */
   corroboratedBy: z.array(z.string()).default([]),
+  /**
+   * The event id that replaced this one.
+   *
+   * Append-only still holds: the old row is never edited away, it is marked. What
+   * changes is what reads return — a superseded row must not reach a digest, a
+   * reminder or an answer, or the student is told a venue that moved two days ago.
+   */
+  supersededBy: z.string().nullable().default(null),
   chatJid: z.string(),
   courseKey: z.string().nullable(),
   extractedAt: z.date(),

@@ -75,7 +75,12 @@ export class DeadlineService {
       const sent = await deliveryService.send(
         student,
         options.attachmentsOnly ? this.attachmentIntro(item) : this.format(item, brief),
-        { kind: 'deadline', courseKey: item.courseKey, eventType: item.eventType },
+        {
+          kind: 'deadline',
+          courseKey: item.courseKey,
+          eventType: item.eventType,
+          eventId: item.eventId,
+        },
       )
       // No warning, no attachment — a file arriving with no context is worse than
       // the silence the student asked for.

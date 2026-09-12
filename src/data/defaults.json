@@ -50,5 +50,14 @@
     "conversationActiveSeconds": 45,
     "deferSeconds": 60,
     "maxDeferSeconds": 480
+  },
+  "research": {
+    "resultsPerTopic": 2,
+    "topicsResearched": 3,
+    "maxCharacters": 600,
+    "timeoutMs": 6000,
+    "fileResults": 5,
+    "maxFileBytes": 15000000,
+    "downloadTimeoutMs": 20000
   }
 }

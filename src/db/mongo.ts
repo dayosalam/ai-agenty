@@ -51,9 +51,36 @@ async function ensureIndexes(database: Db): Promise<void> {
   await database.collection('pending_decisions').createIndex({ eventId: 1 }, { unique: true })
   await database.collection('pending_decisions').createIndex({ status: 1, askedAt: 1 })
 
+  await database.collection('schedules').createIndex({ phone: 1, kind: 1 })
+  await database.collection('schedules').createIndex({ phone: 1, courseKey: 1 })
+
+  await database.collection('courses').createIndex({ courseKey: 1 }, { unique: true })
+
   await database.collection('conversations').createIndex({ phone: 1 }, { unique: true })
-  // Context goes stale: a pronoun from last week refers to nothing.
-  await database
-    .collection('conversations')
-    .createIndex({ updatedAt: 1 }, { expireAfterSeconds: 60 * 60 * 6 })
+  await ensureConversationTtl(database)
+}
+
+/** A month. The referents inside expire in 45 minutes; the transcript is the reason. */
+const CONVERSATION_TTL_SECONDS = 60 * 60 * 24 * 30
+
+/**
+ * The whole document goes when it expires, transcript included — so this bounds how
+ * far back "you told me last week" can reach, not just how long a pronoun lives.
+ *
+ * Mongo refuses a createIndex that changes an existing index's options, and the six
+ * hour version of this index is already out there deleting threads overnight. collMod
+ * is the only way to widen one in place.
+ */
+async function ensureConversationTtl(database: Db): Promise<void> {
+  try {
+    await database
+      .collection('conversations')
+      .createIndex({ updatedAt: 1 }, { expireAfterSeconds: CONVERSATION_TTL_SECONDS })
+  } catch {
+    await database.command({
+      collMod: 'conversations',
+      index: { keyPattern: { updatedAt: 1 }, expireAfterSeconds: CONVERSATION_TTL_SECONDS },
+    })
+    logger.info({ seconds: CONVERSATION_TTL_SECONDS }, 'conversation ttl widened')
+  }
 }

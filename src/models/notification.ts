@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const NotificationType = z.enum(['instant', 'digest', 'deadline_warning'])
+export const NotificationType = z.enum(['instant', 'digest', 'deadline_warning', 'reminder'])
 export type NotificationType = z.infer<typeof NotificationType>
 
 export const NotificationSchema = z.object({
