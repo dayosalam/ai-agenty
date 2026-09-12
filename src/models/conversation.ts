@@ -38,7 +38,18 @@ export const ConversationSchema = z.object({
    * capturing an unrelated message an hour later.
    */
   pendingAction: z
-    .enum(['confirm_wipe', 'awaiting_name', 'awaiting_resource_course'])
+    .enum(['confirm_wipe', 'awaiting_name', 'awaiting_resource_course', 'confirm_group_course'])
+    .nullable()
+    .default(null),
+  /**
+   * The group-and-course pairing waiting on a yes.
+   *
+   * Held apart from `courseKey`, which means "the course we were last discussing".
+   * Overloading that would make an unrelated question about another course silently
+   * change which course a group gets filed under.
+   */
+  proposal: z
+    .object({ chatJid: z.string(), groupName: z.string().nullable(), course: z.string() })
     .nullable()
     .default(null),
   updatedAt: z.date(),

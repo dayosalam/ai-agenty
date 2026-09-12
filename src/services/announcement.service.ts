@@ -12,10 +12,10 @@ import {
 import { courseDisplay, courseKey } from '../utils/courses.js'
 import { describeAuthority, outranks } from '../utils/authority.js'
 import { formatStamp, formatTime12 } from '../utils/dates.js'
-import { phoneToJid } from '../whatsapp/jid.js'
 import { conversationService } from './conversation.service.js'
 import { deliveryService } from './delivery.service.js'
 import { notifierService } from './notifier.service.js'
+import { operatorJid } from './operator.js'
 
 /**
  * The instant DM. Every new announcement goes to every student subscribed to that
@@ -188,7 +188,8 @@ _${source.senderName ?? 'unknown'}, ${stamp}_`
       'announcement had no course, asking the operator',
     )
 
-    if (!config.admin.phone) {
+    const operator = await operatorJid()
+    if (!operator) {
       logger.warn('no ADMIN_PHONE set — nobody can answer which course this was')
       return
     }
@@ -205,7 +206,7 @@ Which course is this? Reply:
 • *ignore* — skip it`
 
     try {
-      await notifierService.sendText(phoneToJid(config.admin.phone), body)
+      await notifierService.sendText(operator, body)
     } catch (error) {
       logger.error({ err: error }, 'could not ask about unroutable announcement')
     }

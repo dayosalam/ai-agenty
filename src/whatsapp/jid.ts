@@ -29,6 +29,11 @@ export const BROADCAST_SUFFIX = '@broadcast'
 export const NEWSLETTER_SUFFIX = '@newsletter'
 
 export function phoneToJid(phone: string): string {
+  // Already a JID — a LID especially. Appending @s.whatsapp.net to
+  // "210260258201705@lid" produces a malformed address that raises nothing and is
+  // simply never delivered, which is the failure this whole module exists to stop.
+  if (phone.includes('@')) return phone
+
   let normalized = phone.replace(/[+\s\-()]/g, '')
   // Nigerian local format: leading 0 + 10 digits -> country code 234
   if (normalized.startsWith('0') && normalized.length === 11) {

@@ -18,6 +18,16 @@ describe('phoneToJid', () => {
     expect(phoneToJid('+234 801 234-5678')).toBe('2348012345678@s.whatsapp.net')
   })
 
+  /**
+   * WhatsApp reaches one handset two ways, and Signal keeps a separate ratchet per
+   * address. Appending @s.whatsapp.net to a LID built a third address that belongs
+   * to nobody — never delivered, and never an error either.
+   */
+  it('leaves an identifier that is already a JID alone', () => {
+    expect(phoneToJid('210260258201705@lid')).toBe('210260258201705@lid')
+    expect(phoneToJid('2348012345678@s.whatsapp.net')).toBe('2348012345678@s.whatsapp.net')
+  })
+
   it('uses the Baileys suffix, never Green API’s @c.us', () => {
     // A wrong suffix raises nothing — the DM is simply never delivered.
     expect(phoneToJid('08012345678')).not.toContain('@c.us')

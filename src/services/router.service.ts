@@ -68,8 +68,8 @@ Pick ONE intent:
 - "resume_alerts" — asking to be messaged again: "you can start again", "turn the morning messages back on", "I want everything again"
 - "change_name" — asking to be called something else. Put the name in newName, nothing else. "call me Ada", "stop calling me Adedamola"
 - "group_link" — telling Peermate about a group: that they added it to one, or which course a group belongs to. "I added you to a group named peermate", "that group is for CVE 575", "the biology group is BIO 101"
-- "help" — "what can you do?", "help"
-- "unsupported" — asking for something Peermate cannot do: setting a reminder for a specific time, texting someone else, opinions ("do you think the test will be hard?"), or general knowledge unrelated to their groups
+- "help" — asking about Peermate itself rather than about a course: what it can do, or how to make it do something. "what can you do?", "help", "how do I approve the group?", "how do I add a course?", "how do I stop the morning messages?", "what does approve mean?", "how does this work?". Note the difference from ask_question: "how do I approve the group?" is about operating Peermate; "how do I get to LG7?" is about the world and Peermate cannot answer it
+- "unsupported" — asking for something Peermate cannot do: setting a reminder for a specific time, texting someone else, opinions ("do you think the test will be hard?"), or general knowledge unrelated to their groups. NOT for questions about Peermate's own setup — "what group have you been approved for?", "which groups are you reading?", "are you connected yet?" are "help", because Peermate is the only thing that knows the answer
 - "smalltalk" — greetings, thanks, acknowledgements ("ok", "it is done", 👍), anything with no request in it
 
 The difference between ask_question and catch_up: a question is about ONE thing the student already has in mind. A catch-up is an open request for everything over a period.

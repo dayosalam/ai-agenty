@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Conversation, Extraction, Message, User } from '../src/models/index.js'
+import type { Conversation, Extraction, Group, Message, User } from '../src/models/index.js'
 import type { Routed } from '../src/services/router.service.js'
 
 const PHONE = '2348100000000'
@@ -7,8 +7,10 @@ const JID = `${PHONE}@s.whatsapp.net`
 
 let user: User
 let conversation: Conversation | null = null
+let pendingGroups: Group[] = []
 const outbox: string[] = []
 const sentFiles: string[] = []
+const proposed: Array<{ chatJid: string; course: string }> = []
 
 const extraction: Extraction = {
   eventId: 'evt-1',
@@ -47,7 +49,11 @@ vi.mock('../src/repositories/index.js', () => ({
       user = next
     }),
   },
-  groupRepository: { approved: vi.fn(async () => []), pending: vi.fn(async () => []) },
+  groupRepository: {
+    approved: vi.fn(async () => []),
+    pending: vi.fn(async () => pendingGroups),
+    findByJid: vi.fn(async (jid: string) => pendingGroups.find((g) => g.chatJid === jid) ?? null),
+  },
   messageRepository: { findById: vi.fn(async () => sourceMessage) },
   extractionRepository: { findByEventId: vi.fn(async () => extraction) },
   conversationRepository: {
@@ -93,6 +99,14 @@ vi.mock('../src/services/notifier.service.js', () => ({
       sentFiles.push('image')
     }),
     withTyping: vi.fn(async (_jid: string, work: () => Promise<unknown>) => work()),
+  },
+}))
+
+vi.mock('../src/services/group.service.js', () => ({
+  groupService: {
+    propose: vi.fn(async (chatJid: string, course: string) => {
+      proposed.push({ chatJid, course })
+    }),
   },
 }))
 
@@ -155,6 +169,8 @@ function dm(text: string): Message {
 beforeEach(() => {
   outbox.length = 0
   sentFiles.length = 0
+  proposed.length = 0
+  pendingGroups = []
   conversation = null
   answer.mockClear()
   user = {
@@ -301,5 +317,159 @@ describe('two requests in one message', () => {
     route = routed({ secondRequest: 'send the slides' })
     await dmService.handle(dm('when is the test and send the slides?'))
     expect(outbox.at(-1)).toMatch(/also asked me to send the slides/i)
+  })
+})
+
+function pendingGroup(over: Partial<Group> = {}): Group {
+  return {
+    chatJid: '120363430457309406@g.us',
+    name: 'Peermate',
+    defaultCourse: null,
+    defaultCourseKey: null,
+    status: 'pending',
+    addedBy: null,
+    addedByName: null,
+    participantCount: 2,
+    proposedCourse: null,
+    proposedBy: null,
+    trustedSenders: [],
+    joinedAt: new Date(),
+    approvedAt: null,
+    ...over,
+  }
+}
+
+/**
+ * What gets agreed here decides where every announcement from that group is filed for
+ * the rest of the semester, and the student cannot see what their typed — or
+ * photographed — course code became. Reading it back is cheaper than finding out in
+ * week six that the alerts went somewhere else.
+ */
+describe('saying which course a group is for', () => {
+  it('reads the pairing back instead of acting on it', async () => {
+    pendingGroups = [pendingGroup()]
+    route = routed({ intent: 'group_link' })
+
+    await dmService.handle(dm('the group is for Cve 575'))
+
+    expect(outbox.at(-1)).toMatch(/Peermate.*is the group for \*CVE 575\*/s)
+    expect(proposed).toHaveLength(0)
+    expect(conversation!.pendingAction).toBe('confirm_group_course')
+  })
+
+  it('relays it only once they agree', async () => {
+    pendingGroups = [pendingGroup()]
+    route = routed({ intent: 'group_link' })
+    await dmService.handle(dm('the group is for Cve 575'))
+
+    await dmService.handle(dm('yes'))
+
+    expect(proposed).toEqual([{ chatJid: '120363430457309406@g.us', course: 'CVE 575' }])
+    expect(outbox.at(-1)).toMatch(/not reading it yet/i)
+    expect(conversation!.pendingAction).toBeNull()
+  })
+
+  it('takes a different code as a correction rather than a refusal', async () => {
+    pendingGroups = [pendingGroup()]
+    route = routed({ intent: 'group_link' })
+    await dmService.handle(dm('the group is for Cve 575'))
+
+    await dmService.handle(dm('CVE 577'))
+    expect(proposed).toHaveLength(0)
+    expect(outbox.at(-1)).toMatch(/CVE 577/)
+
+    await dmService.handle(dm('yes'))
+    expect(proposed).toEqual([{ chatJid: '120363430457309406@g.us', course: 'CVE 577' }])
+  })
+
+  it('asks again on a no, and relays nothing', async () => {
+    pendingGroups = [pendingGroup()]
+    route = routed({ intent: 'group_link' })
+    await dmService.handle(dm('the group is for Cve 575'))
+
+    await dmService.handle(dm('no'))
+    expect(proposed).toHaveLength(0)
+    expect(outbox.at(-1)).toMatch(/which course/i)
+    expect(conversation!.pendingAction).toBeNull()
+  })
+
+  it('says which group it picked when several are waiting', async () => {
+    pendingGroups = [pendingGroup(), pendingGroup({ chatJid: '2@g.us', name: 'Dept Notices' })]
+    route = routed({ intent: 'group_link' })
+
+    await dmService.handle(dm('the group is for CVE 575'))
+    expect(outbox.at(-1)).toMatch(/out of 2 waiting/i)
+  })
+
+  it('lets them change the subject instead of answering', async () => {
+    pendingGroups = [pendingGroup()]
+    route = routed({ intent: 'group_link' })
+    await dmService.handle(dm('the group is for CVE 575'))
+
+    route = routed({})
+    await dmService.handle(dm('when is the test?'))
+    expect(answer).toHaveBeenCalled()
+    expect(proposed).toHaveLength(0)
+  })
+})
+
+function voiceNote(transcript: string): Message {
+  return {
+    ...dm(''),
+    type: 'audio',
+    text: null,
+    transcript,
+    mediaKey: 'audio/incoming',
+    mimeType: 'audio/ogg',
+  } as Message
+}
+
+/**
+ * A DM's content can live entirely in its transcript. This broke once: media was read
+ * only on the group branch, so a student's recorded question reached the router as an
+ * empty string and was answered as though they had sent nothing.
+ */
+describe('talking to it with a voice note', () => {
+  it('asks a question from the transcript alone', async () => {
+    route = routed({})
+    await dmService.handle(voiceNote('When is the CSC 301 test?'))
+
+    const [question] = answer.mock.calls[0] as unknown as [string]
+    expect(question).toBe('When is the CSC 301 test?')
+  })
+
+  it('runs a command spoken aloud, punctuation and capitals included', async () => {
+    // Whisper returns "Pause until Monday." — the literal matcher has to survive that.
+    await dmService.handle(voiceNote('Pause until Monday.'))
+    expect(user.pausedUntil).toBeInstanceOf(Date)
+    expect(answer).not.toHaveBeenCalled()
+  })
+
+  it('says it could not hear rather than answering an empty question', async () => {
+    await dmService.handle({ ...dm(''), type: 'audio', text: null } as Message)
+    expect(outbox.at(-1)).toMatch(/couldn't make anything out of that/i)
+    expect(answer).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * A voice note the student cannot see transcribed is a black box. "I'm not sure what
+ * you're after" leaves them unable to tell a misunderstood request from a misheard
+ * word — and a two-second recording is far more often the latter.
+ */
+describe('when it cannot make sense of a spoken message', () => {
+  it('reads back what it heard', async () => {
+    route = routed({ confidence: 0.2 })
+    await dmService.handle(voiceNote('Uhh, yeah, so'))
+
+    expect(outbox.at(-1)).toMatch(/I heard: _"Uhh, yeah, so"_/)
+    expect(outbox.at(-1)).toMatch(/not sure what you're after/i)
+  })
+
+  it('does not read typed text back at someone who can already see it', async () => {
+    route = routed({ confidence: 0.2 })
+    await dmService.handle(dm('hmm'))
+
+    expect(outbox.at(-1)).not.toMatch(/I heard/)
   })
 })

@@ -1,6 +1,6 @@
 import { explain } from '../core/failures.js'
 import { logger } from '../core/logger.js'
-import type { Message, User } from '../models/index.js'
+import type { Conversation, Group, Message, User } from '../models/index.js'
 import { groupRepository, messageRepository, userRepository } from '../repositories/index.js'
 import { config } from '../config.js'
 import { getMedia } from '../db/minio.js'
@@ -12,6 +12,7 @@ import { conversationService } from './conversation.service.js'
 import { DeliveryService } from './delivery.service.js'
 import { digestService } from './digest.service.js'
 import { groupService } from './group.service.js'
+import { guidanceService } from './guidance.service.js'
 import { notifierService } from './notifier.service.js'
 import { onboardingService } from './onboarding.service.js'
 import { qaService } from './qa.service.js'
@@ -25,6 +26,10 @@ const MIN_CONFIDENCE = 0.5
 const NOT_AN_OPERATOR = `That's a setup command — only whoever runs Peermate can use it.
 
 If a group needs connecting, tell me which course it's for and I'll pass it on. Send *help* for what you can do.`
+
+const AGREED =
+  /^(yes|yeah|yep|yh|correct|right|exactly|that'?s (it|right)|sure|ok(ay)?|na so|👍)\b/i
+const DECLINED = /^(no|nope|nah|wrong|not (that|it)|different|another)\b/i
 
 /** One pictograph or several, with nothing else in the message. */
 const EMOJI_ONLY = /^(?:[\p{Extended_Pictographic}\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{200D}]|\s)+$/u
@@ -111,8 +116,7 @@ export class DmService {
     }
 
     // An answer to a question Peermate asked, before anything reinterprets it.
-    const answered = await this.answerResourceMenu(user, text, message.chatJid)
-    if (answered) return
+    if (await this.answerPending(user, text, message.chatJid)) return
 
     // Exact commands first: zero latency, zero cost, and no chance of a model
     // reinterpreting a word the student meant literally.
@@ -124,6 +128,16 @@ export class DmService {
 
     if (adminService.looksLikeOperatorCommand(text)) {
       await notifierService.sendText(message.chatJid, NOT_AN_OPERATOR)
+      return
+    }
+
+    // "How do I approve it?" is a question about Peermate, not about a course.
+    // Routed as a question it searches the group archive, finds nothing, and says so
+    // — which reads as broken to somebody who was asking for instructions.
+    if (guidanceService.looksLikeAboutPeermate(text)) {
+      const how = await guidanceService.answer(user, text, adminService.isOperator(phone))
+      await notifierService.sendText(message.chatJid, how)
+      await conversationService.rememberQuestion(phone, text, how)
       return
     }
 
@@ -143,7 +157,7 @@ export class DmService {
     try {
       // Typing stays visible for the whole call, not just the first ten seconds.
       const reply = await notifierService.withTyping(message.chatJid, () =>
-        this.respond(user, text, message.chatJid),
+        this.respond(user, text, message.chatJid, message.type === 'audio'),
       )
       if (reply) {
         await notifierService.sendText(message.chatJid, reply)
@@ -158,7 +172,12 @@ export class DmService {
   }
 
   /** Returns the text to send, or null when the branch already replied itself. */
-  private async respond(user: User, text: string, jid: string): Promise<string | null> {
+  private async respond(
+    user: User,
+    text: string,
+    jid: string,
+    spoken: boolean,
+  ): Promise<string | null> {
     const context = await conversationService.summarise(user.phone)
     const routed = await routerService.route(text, context)
 
@@ -168,8 +187,8 @@ export class DmService {
 
     if (routed.confidence < MIN_CONFIDENCE) {
       return routed.isFollowUp
-        ? "I'm not sure what that's about — we haven't talked about anything recently. Which course, and what would you like to know?"
-        : `I'm not sure what you're after. Do you want:\n\n• an answer about something that was announced\n• the files for a course\n• a rundown of what's been happening\n\nJust say which, or send *help*.`
+        ? `${this.heard(text, spoken)}I'm not sure what that's about — we haven't talked about anything recently. Which course, and what would you like to know?`
+        : `${this.heard(text, spoken)}I'm not sure what you're after. Do you want:\n\n• an answer about something that was announced\n• the files for a course\n• a rundown of what's been happening\n\nJust say which, or send *help*.`
     }
 
     const reply = await this.act(user, text, jid, routed, resolved.courseKey)
@@ -212,6 +231,9 @@ export class DmService {
       case 'group_link':
         return this.linkGroup(user, text)
 
+      case 'help':
+        return guidanceService.answer(user, text, adminService.isOperator(user.phone))
+
       case 'list_courses':
       case 'add_course':
       case 'remove_course':
@@ -219,12 +241,13 @@ export class DmService {
       case 'pause_alerts':
       case 'resume_alerts':
       case 'change_name':
-      case 'help':
         // The model recognised an instruction the literal matcher missed, usually
         // because it was phrased as a sentence. Hand it back with an explicit verb.
+        // A miss falls through to guidance, never to retrieval: every one of these is
+        // about Peermate, and the group archive has nothing to say about any of them.
         return (
           (await studentCommandsService.handle(user, this.asCommand(routed, text))) ??
-          qaService.answer(text, user.courseKeys)
+          guidanceService.answer(user, text, adminService.isOperator(user.phone))
         )
 
       case 'smalltalk':
@@ -286,15 +309,27 @@ export class DmService {
   }
 
   /**
-   * "Which course?" answered with a bare code.
+   * The answer to something Peermate itself just asked.
    *
-   * The menu explicitly asked for one, so "CSC 301" here means "CSC 301 resources"
-   * and nothing else. Left to the router this was a judgement call about context —
-   * right most of the time, which is not good enough for the step that immediately
-   * follows an instruction Peermate itself gave.
+   * Deterministic by design. These follow an instruction Peermate gave a second
+   * earlier, so leaving them to the router makes the step right most of the time —
+   * which is not good enough when the question was "which course is this group for?"
+   * and the answer decides where a semester of announcements gets filed.
+   *
+   * Returns true when the message was consumed. Anything that is not an answer falls
+   * through to ordinary handling, so changing the subject is always allowed.
    */
-  private async answerResourceMenu(user: User, text: string, jid: string): Promise<boolean> {
+  private async answerPending(user: User, text: string, jid: string): Promise<boolean> {
     const conversation = await conversationService.get(user.phone)
+
+    if (conversation?.pendingAction === 'confirm_group_course' && conversation.proposal) {
+      const reply = await this.resolveGroupProposal(user, conversation.proposal, text)
+      if (!reply) return false
+      await notifierService.sendText(jid, reply)
+      await conversationService.rememberQuestion(user.phone, text, reply)
+      return true
+    }
+
     if (conversation?.pendingAction !== 'awaiting_resource_course') return false
 
     await conversationService.expect(user.phone, null)
@@ -393,6 +428,21 @@ export class DmService {
     return null
   }
 
+  /**
+   * Shows the transcript when a spoken message could not be understood.
+   *
+   * A voice note the student cannot see transcribed is a black box: "I'm not sure
+   * what you're after" leaves them unable to tell whether Peermate misunderstood the
+   * request or simply misheard the words. Reading it back turns a dead end into an
+   * obvious correction.
+   */
+  private heard(text: string, spoken: boolean): string {
+    if (!spoken) return ''
+    const words = text.replace(/\s+/g, ' ').trim()
+    if (!words) return ''
+    return `I heard: _"${words}"_\n\n`
+  }
+
   private unsupported(user: User): string {
     const watching =
       user.courseKeys.length > 0
@@ -458,15 +508,65 @@ Send *help* to see everything.`
       return `I've been added to *${group.name ?? 'a group'}* and it's waiting to be set up. Which course is it for? Send the code, like *CVE 575*.`
     }
 
-    const course = courseDisplay(key) ?? key
-    await groupService.propose(group.chatJid, course, user.displayName ?? user.phone)
+    // Read back before relaying. What gets confirmed here decides where every
+    // announcement from that group is filed for the rest of the semester, and the
+    // student cannot see what "Cve 575" or a photographed code became — a misread
+    // shows up weeks later as alerts that never arrive.
+    return this.confirmGroupCourse(user, group, courseDisplay(key) ?? key)
+  }
 
-    const mine = user.courseKeys.includes(key)
+  private async confirmGroupCourse(user: User, group: Group, course: string): Promise<string> {
+    await conversationService.proposeGroup(user.phone, {
+      chatJid: group.chatJid,
+      groupName: group.name,
+      course,
+    })
+
+    const others = (await groupRepository.pending()).filter(
+      (other) => other.chatJid !== group.chatJid,
+    )
+    const ambiguity =
+      others.length > 0
+        ? `\n\n_I picked *${group.name ?? 'that group'}* out of ${others.length + 1} waiting. If you meant another one, say its name._`
+        : ''
+
+    return `Just so I get this right — *${group.name ?? 'that group'}* is the group for *${course}*?
+
+Send *yes* and I'll pass it on. If the code is wrong, just send the right one.${ambiguity}`
+  }
+
+  /** The yes, the correction, or the no. */
+  private async resolveGroupProposal(
+    user: User,
+    proposal: NonNullable<Conversation['proposal']>,
+    text: string,
+  ): Promise<string | null> {
+    // A different code is a correction, not a refusal — take it and ask again rather
+    // than making them say no first.
+    const [corrected] = parseCourseList(text)
+    if (corrected && (courseDisplay(corrected) ?? corrected) !== proposal.course) {
+      const group = await groupRepository.findByJid(proposal.chatJid)
+      if (!group) return null
+      return this.confirmGroupCourse(user, group, courseDisplay(corrected) ?? corrected)
+    }
+
+    if (DECLINED.test(text)) {
+      await conversationService.proposeGroup(user.phone, null)
+      return `No problem — which course is *${proposal.groupName ?? 'that group'}* for? Send the code, like *CVE 575*.`
+    }
+
+    if (!AGREED.test(text) && !corrected) return null
+
+    await conversationService.proposeGroup(user.phone, null)
+    await groupService.propose(proposal.chatJid, proposal.course, user.displayName ?? user.phone)
+
+    const key = courseKey(proposal.course)
+    const mine = key ? user.courseKeys.includes(key) : false
     const tail = mine
-      ? `You're taking ${course}, so once it's approved you'll get everything from it.`
-      : `You're not registered for ${course} — send *add ${course}* if you want its announcements.`
+      ? `You're taking ${proposal.course}, so once it's approved you'll get everything from it.`
+      : `You're not registered for ${proposal.course} — send *add ${proposal.course}* if you want its announcements.`
 
-    return `Thanks — I've noted that *${group.name ?? 'that group'}* is for *${course}*.
+    return `Noted — *${proposal.groupName ?? 'that group'}* is for *${proposal.course}*.
 
 I'm not reading it yet: a group has to be approved before I look at anything in it. I've passed this on, and I'll start listening as soon as it's approved.
 

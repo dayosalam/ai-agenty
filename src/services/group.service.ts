@@ -1,10 +1,10 @@
-import { config } from '../config.js'
 import { logger } from '../core/logger.js'
 import type { Authority, Group } from '../models/index.js'
 import { groupRepository, pendingRepository } from '../repositories/index.js'
 import { courseDisplay, courseKey, parseCourseList } from '../utils/courses.js'
-import { jidToPhone, phoneToJid } from '../whatsapp/jid.js'
+import { jidToPhone } from '../whatsapp/jid.js'
 import { notifierService } from './notifier.service.js'
+import { operatorJid } from './operator.js'
 
 export interface GroupContext {
   subject: string | null
@@ -121,10 +121,11 @@ export class GroupService {
     await groupRepository.upsert({ ...group, proposedCourse: course, proposedBy: by })
     logger.info({ chatJid, course, by }, 'course proposed for group')
 
-    if (config.admin.phone) {
+    const operator = await operatorJid()
+    if (operator) {
       await notifierService
         .sendText(
-          phoneToJid(config.admin.phone),
+          operator,
           `💡 *${by}* says *${group.name ?? chatJid}* is the group for *${course}*.
 
 It's still waiting on you. Reply *here* with *approve ${course}* to start reading it, or *ignore group*.
@@ -157,7 +158,8 @@ It's still waiting on you. Reply *here* with *approve ${course}* to start readin
    * one exception: they configured the bot, and this is the only way to ask.
    */
   private async askOperator(group: Group): Promise<void> {
-    if (!config.admin.phone) {
+    const operator = await operatorJid()
+    if (!operator) {
       logger.warn(
         { chatJid: group.chatJid },
         'no ADMIN_PHONE set — this group can never be approved and will stay silent',
@@ -182,7 +184,7 @@ It's still waiting on you. Reply *here* with *approve ${course}* to start readin
       : '*approve CSC 301*'
 
     await notifierService.sendText(
-      phoneToJid(config.admin.phone),
+      operator,
       `📎 I've been added to a group.
 
 ${facts}

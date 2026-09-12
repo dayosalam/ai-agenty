@@ -125,6 +125,11 @@ export class ConversationService {
     await this.merge(phone, { pendingAction: action })
   }
 
+  /** Holds a group-and-course pairing until the student confirms it is right. */
+  async proposeGroup(phone: string, proposal: Conversation['proposal']): Promise<void> {
+    await this.merge(phone, { proposal, pendingAction: proposal ? 'confirm_group_course' : null })
+  }
+
   async forget(phone: string): Promise<void> {
     await conversationRepository.clear(phone)
   }
@@ -140,6 +145,7 @@ export class ConversationService {
       lastAnswer: null,
       lastQuestion: null,
       pendingAction: null,
+      proposal: null,
       ...existing,
       ...patch,
       updatedAt: new Date(),

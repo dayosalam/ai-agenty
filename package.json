@@ -17,7 +17,8 @@
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "infra:logs": "docker compose logs -f",
-    "reset": "tsx src/scripts/reset.ts"
+    "reset": "tsx src/scripts/reset.ts",
+    "repair-session": "tsx src/scripts/repair-session.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
