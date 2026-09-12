@@ -716,6 +716,34 @@ describe('reading a photographed timetable', () => {
     expect(conversation?.pendingAction).toBe('confirm_timetable')
   })
 
+  /**
+   * The one moment a student is most likely to send a timetable is while registering,
+   * and onboarding reads the codes off it and stops — so the grid was thrown away
+   * exactly then, and "when is my next class?" answered that it had never seen one.
+   */
+  it('keeps the schedule from a timetable sent during registration', async () => {
+    user = { ...user, onboardingState: 'awaiting_courses', courseKeys: [] }
+    timetableRead = {
+      kind: 'class_timetable',
+      unreadable: false,
+      entries: [row('CSC301', 1, '08:00')],
+      courseKeys: ['CSC301'],
+      courses: [],
+      mismatches: [],
+      undated: [],
+    }
+
+    await dmService.handle({ ...photo(), transcript: 'Monday CSC 301 8am' })
+    expect(outbox[0]).toMatch(/CSC 301/)
+
+    // Held while onboarding finishes its own questions — two open questions collide.
+    expect(outbox.at(-1)).not.toMatch(/Is that right\?/)
+
+    await dmService.handle(dm('7am'))
+    expect(outbox.at(-1)).toMatch(/Is that right\?/)
+    expect(conversation?.pendingAction).toBe('confirm_timetable')
+  })
+
   it('still reads a genuine course list as one', async () => {
     timetableRead = {
       kind: 'course_list',

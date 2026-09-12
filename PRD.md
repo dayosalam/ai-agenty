@@ -416,6 +416,12 @@ discarded a fully read timetable, leaving the student enrolled in the right cour
 with no schedule and nothing to say anything had been lost. A read that produced rows
 is a timetable; only one that produced none is a course list.
 
+**Registration is when a timetable is most likely to arrive.** Onboarding reads the
+course codes off the photo and stops there, so the grid was discarded at exactly that
+moment and "when is my next class?" then answered that it had never seen one. The read
+is held instead, and offered once registration is finished — not straight away, because
+onboarding still has its own questions to ask and two open questions collide.
+
 **A photographed timetable enrols the courses on it.** It is the most authoritative
 statement of what a student takes, and storing keeps only rows for courses they watch —
 so without this a first timetable is read correctly, previewed in full, and then stores

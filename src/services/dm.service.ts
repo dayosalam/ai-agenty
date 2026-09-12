@@ -220,7 +220,19 @@ export class DmService {
 
     const onboardingReply = await onboardingService.handle(message)
     if (onboardingReply) {
+      // A timetable photo sent while registering is two things at once: the codes on
+      // it are the courses they take, and the grid is their schedule. Onboarding reads
+      // the codes and stops, so the schedule was thrown away at the one moment a
+      // student is most likely to send one. Held rather than offered straight away —
+      // onboarding has its own questions left to ask, and two open questions collide.
+      if (timetableService.looksLikeTimetable(message)) await this.holdTimetable(phone, message)
+
       await notifierService.sendText(message.chatJid, onboardingReply)
+
+      const registered = await userRepository.findByPhone(phone)
+      if (registered?.onboardingState === 'registered') {
+        await this.offerHeldTimetable(registered, message.chatJid)
+      }
       return
     }
 
@@ -697,6 +709,25 @@ export class DmService {
   }
 
   /** A photographed course list, which is a request to watch those courses. */
+  /** Reads a timetable sent mid-registration and keeps it until there is a student. */
+  private async holdTimetable(phone: string, message: Message): Promise<void> {
+    const read = await timetableService.read(message)
+    if (!read || read.kind === 'other' || read.unreadable || read.entries.length === 0) return
+
+    await courseService.learn(read.courses)
+    await conversationService.proposeTimetable(phone, read)
+    logger.info({ phone, entries: read.entries.length }, 'timetable held through onboarding')
+  }
+
+  /** Offers it once registration is done, in the same words a later photo would get. */
+  private async offerHeldTimetable(user: User, jid: string): Promise<void> {
+    const held = (await conversationService.get(user.phone))?.timetable as ReadTimetable | null
+    if (!held) return
+
+    await this.watchCoursesIn(user, held.entries)
+    await this.say(user.phone, jid, scheduleService.preview(held, user))
+  }
+
   /** Adds the courses a photographed timetable names but the student is not watching. */
   private async watchCoursesIn(user: User, entries: ReadTimetable['entries']): Promise<string[]> {
     const named = [
